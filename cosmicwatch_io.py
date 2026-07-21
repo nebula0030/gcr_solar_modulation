@@ -80,6 +80,11 @@ def read_events(path: str, chunk_size: int = 500_000) -> Events:
 
     Raises ``DataFormatError`` if the file is not 13-column v3X data.
     Malformed rows (including a truncated final line) are skipped.
+
+    Rows are accumulated into in-memory blocks of at most ``chunk_size``
+    rows; each completed block is converted to numpy arrays immediately and
+    the underlying Python lists are discarded, so at most one chunk's worth
+    of rows exist as Python objects at a time.
     """
     timestamps: List[float] = []
     flags: List[int] = []
@@ -87,6 +92,29 @@ def read_events(path: str, chunk_size: int = 500_000) -> Events:
     deadtimes: List[float] = []
     temps: List[float] = []
     presses: List[float] = []
+
+    timestamp_chunks: List[np.ndarray] = []
+    flag_chunks: List[np.ndarray] = []
+    adc_chunks: List[np.ndarray] = []
+    deadtime_chunks: List[np.ndarray] = []
+    temp_chunks: List[np.ndarray] = []
+    press_chunks: List[np.ndarray] = []
+
+    def _flush_chunk() -> None:
+        if not timestamps:
+            return
+        timestamp_chunks.append(np.asarray(timestamps, dtype=np.float64))
+        flag_chunks.append(np.asarray(flags, dtype=np.int8))
+        adc_chunks.append(np.asarray(adcs, dtype=np.int32))
+        deadtime_chunks.append(np.asarray(deadtimes, dtype=np.float64))
+        temp_chunks.append(np.asarray(temps, dtype=np.float64))
+        press_chunks.append(np.asarray(presses, dtype=np.float64))
+        timestamps.clear()
+        flags.clear()
+        adcs.clear()
+        deadtimes.clear()
+        temps.clear()
+        presses.clear()
 
     first_wall: Optional[np.datetime64] = None
     last_wall: Optional[np.datetime64] = None
@@ -102,24 +130,38 @@ def read_events(path: str, chunk_size: int = 500_000) -> Events:
                 saw_wrong_width = True
                 continue
             try:
-                timestamps.append(float(fields[_COL_TIMESTAMP]))
-                flags.append(int(fields[_COL_FLAG]))
-                adcs.append(int(fields[_COL_ADC]))
-                deadtimes.append(float(fields[_COL_DEADTIME]))
-                temps.append(float(fields[_COL_TEMP]))
-                presses.append(float(fields[_COL_PRESS]))
+                # Parse every field into a local first. Nothing is appended
+                # to a buffer until the whole row -- including the wall
+                # clock -- has parsed successfully, so a mid-row failure
+                # can never leave the buffers misaligned.
+                timestamp = float(fields[_COL_TIMESTAMP])
+                flag = int(fields[_COL_FLAG])
+                adc = int(fields[_COL_ADC])
+                deadtime = float(fields[_COL_DEADTIME])
+                temp = float(fields[_COL_TEMP])
+                press = float(fields[_COL_PRESS])
                 wall = _parse_wall_clock(fields[_COL_TIME], fields[_COL_DATE])
             except ValueError:
-                # Truncated or corrupt row. It may have appended to some
-                # buffers before failing, so trim every buffer back to the
-                # shortest length and keep the columns aligned.
-                buffers = [timestamps, flags, adcs, deadtimes, temps, presses]
-                _truncate_all(buffers, min(len(b) for b in buffers))
+                # Truncated or corrupt row. Nothing has been committed yet,
+                # so skipping it is just a `continue`.
                 continue
+
+            timestamps.append(timestamp)
+            flags.append(flag)
+            adcs.append(adc)
+            deadtimes.append(deadtime)
+            temps.append(temp)
+            presses.append(press)
+
             saw_any_row = True
             if first_wall is None:
                 first_wall = wall
             last_wall = wall
+
+            if len(timestamps) >= chunk_size:
+                _flush_chunk()
+
+    _flush_chunk()
 
     if not saw_any_row:
         if saw_wrong_width:
@@ -130,23 +172,18 @@ def read_events(path: str, chunk_size: int = 500_000) -> Events:
             )
         raise DataFormatError("No data rows found in {0!r}.".format(path))
 
-    timestamp_arr = np.asarray(timestamps, dtype=np.float64)
+    timestamp_arr = np.concatenate(timestamp_chunks)
     span_by_timestamp = float(timestamp_arr[-1] - timestamp_arr[0])
     span_by_wall = float((last_wall - first_wall) / np.timedelta64(1, "s"))
     clock_drift_s = span_by_wall - span_by_timestamp
 
     return Events(
         timestamp_s=timestamp_arr,
-        flag=np.asarray(flags, dtype=np.int8),
-        adc=np.asarray(adcs, dtype=np.int32),
-        deadtime_s=np.asarray(deadtimes, dtype=np.float64),
-        temp_c=np.asarray(temps, dtype=np.float64),
-        press_pa=np.asarray(presses, dtype=np.float64),
+        flag=np.concatenate(flag_chunks),
+        adc=np.concatenate(adc_chunks),
+        deadtime_s=np.concatenate(deadtime_chunks),
+        temp_c=np.concatenate(temp_chunks),
+        press_pa=np.concatenate(press_chunks),
         start_utc=first_wall,
         clock_drift_s=clock_drift_s,
     )
-
-
-def _truncate_all(buffers: List[List], length: int) -> None:
-    for buf in buffers:
-        del buf[length:]
