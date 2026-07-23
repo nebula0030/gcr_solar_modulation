@@ -325,3 +325,163 @@ def fetch_sunspot(
         utc=times[inside],
         values=values[inside],
     )
+
+
+# --------------------------------------------------------------------------
+# GOES X-ray flux (NOAA SWPC live feed, NCEI archive fallback)
+# --------------------------------------------------------------------------
+
+GOES_LIVE_URL = "https://services.swpc.noaa.gov/json/goes/primary/xrays-7-day.json"
+
+GOES_ARCHIVE_DIR = (
+    "https://data.ngdc.noaa.gov/platforms/solar-space-observing-satellites/"
+    "goes/goes19/l2/data/xrsf-l2-avg1m_science/{year:04d}/{month:02d}/"
+)
+
+#: SWPC's rolling JSON feed covers only the last 7 days.
+GOES_LIVE_WINDOW_DAYS = 7
+
+#: The long-wavelength band, the one conventionally quoted for flare class.
+GOES_LONG_BAND = "0.1-0.8nm"
+
+
+def parse_goes_live_json(payload: bytes) -> Tuple[np.ndarray, np.ndarray]:
+    """Parse SWPC's X-ray JSON, keeping only the long band."""
+    import json
+
+    try:
+        records = json.loads(payload.decode("utf-8", errors="replace"))
+    except ValueError as exc:
+        raise FetchError("GOES response was not valid JSON: {0}".format(exc))
+    if not isinstance(records, list):
+        raise FetchError("GOES response was not a JSON list")
+
+    pairs = []
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        if record.get("energy") != GOES_LONG_BAND:
+            continue
+        try:
+            when = np.datetime64(str(record["time_tag"]).replace("Z", ""), "ns")
+            flux = float(record["flux"])
+        except (KeyError, ValueError, TypeError):
+            continue
+        pairs.append((when, flux))
+
+    if not pairs:
+        raise FetchError(
+            "GOES response contained no {0} samples".format(GOES_LONG_BAND)
+        )
+
+    pairs.sort(key=lambda item: item[0])
+    times = np.asarray([p[0] for p in pairs], dtype="datetime64[ns]")
+    values = np.asarray([p[1] for p in pairs], dtype=np.float64)
+    return times, values
+
+
+def discover_goes_archive_url(
+    year: int, month: int, day: int, cache: Cache
+) -> str:
+    """Find the archive filename for one day by listing the month directory.
+
+    The filename embeds both a satellite number and a processing version
+    (for example ``sci_xrsf-l2-avg1m_g19_d20260710_v2-2-1.nc``). Both change
+    over time -- the primary GOES satellite rotates and NCEI reprocessing
+    bumps the version -- so the name is discovered rather than constructed.
+    """
+    directory = GOES_ARCHIVE_DIR.format(year=year, month=month)
+    key = "goes-archive-listing|{0:04d}-{1:02d}".format(year, month)
+    listing = cache.get_or_fetch(key, lambda: http_get(directory)).decode(
+        "utf-8", errors="replace"
+    )
+
+    stamp = "d{0:04d}{1:02d}{2:02d}".format(year, month, day)
+    pattern = re.compile(r'(sci_xrsf-l2-avg1m_g\d+_' + stamp + r'_v[\d-]+\.nc)')
+    matches = pattern.findall(listing)
+    if not matches:
+        raise FetchError(
+            "no GOES archive file for {0:04d}-{1:02d}-{2:02d} in {3}".format(
+                year, month, day, directory
+            )
+        )
+    return directory + sorted(set(matches))[-1]
+
+
+def _read_goes_archive_day(
+    year: int, month: int, day: int, cache: Cache
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Download and read one archived netCDF day of long-band flux."""
+    import tempfile
+
+    import netCDF4
+
+    url = discover_goes_archive_url(year, month, day, cache)
+    key = "goes-archive|{0}".format(url)
+    payload = cache.get_or_fetch(key, lambda: http_get(url))
+
+    with tempfile.NamedTemporaryFile(suffix=".nc", delete=False) as handle:
+        handle.write(payload)
+        temp_path = handle.name
+    try:
+        dataset = netCDF4.Dataset(temp_path)
+        try:
+            flux = np.asarray(dataset.variables["xrsb_flux"][:], dtype=np.float64)
+            time_var = dataset.variables["time"]
+            seconds = np.asarray(time_var[:], dtype=np.float64)
+            # GOES-R archive time is seconds since 2000-01-01 12:00:00 UTC.
+            epoch = np.datetime64("2000-01-01T12:00:00", "ns")
+            times = epoch + (seconds * 1e9).astype("timedelta64[ns]")
+        finally:
+            dataset.close()
+    finally:
+        os.unlink(temp_path)
+
+    good = np.isfinite(flux) & (flux > 0)
+    return times[good], flux[good]
+
+
+def fetch_goes_xray(
+    start_utc: np.datetime64, end_utc: np.datetime64, cache: Cache
+) -> ExternalSeries:
+    """Fetch GOES long-band X-ray flux, live or from the NCEI archive."""
+    now = np.datetime64("now", "ns")
+    age_days = float((now - start_utc) / np.timedelta64(1, "D"))
+
+    if age_days <= GOES_LIVE_WINDOW_DAYS:
+        key = "goes-live|{0}".format(
+            _to_datetime(start_utc).strftime("%Y-%m-%d")
+        )
+        payload = cache.get_or_fetch(key, lambda: http_get(GOES_LIVE_URL))
+        times, values = parse_goes_live_json(payload)
+    else:
+        all_times: List[np.ndarray] = []
+        all_values: List[np.ndarray] = []
+        day = start_utc.astype("datetime64[D]")
+        last = end_utc.astype("datetime64[D]")
+        while day <= last:
+            stamp = _to_datetime(day)
+            day_times, day_values = _read_goes_archive_day(
+                stamp.year, stamp.month, stamp.day, cache
+            )
+            all_times.append(day_times)
+            all_values.append(day_values)
+            day = day + np.timedelta64(1, "D")
+        if not all_times:
+            raise FetchError("no GOES archive days retrieved")
+        times = np.concatenate(all_times)
+        values = np.concatenate(all_values)
+
+    inside = (times >= start_utc) & (times <= end_utc)
+    if not np.any(inside):
+        raise FetchError(
+            "GOES data does not cover {0} to {1}".format(start_utc, end_utc)
+        )
+
+    return ExternalSeries(
+        name="GOES X-ray flux (0.1-0.8 nm)",
+        units="W/m^2",
+        source="NOAA SWPC / NCEI",
+        utc=times[inside],
+        values=values[inside],
+    )
