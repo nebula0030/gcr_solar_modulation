@@ -39,13 +39,6 @@ ALL_SOURCES = ("nmdb", "goes", "kp", "sunspot")
 
 OPEN_METEO_ARCHIVE_URL = "https://archive-api.open-meteo.com/v1/archive"
 
-#: Cap on how many rigidity-ranked candidate stations the NMDB fallback loop
-#: will try (including the originally-chosen station) before giving up.
-#: Stations beyond this are poor rigidity matches and not physically
-#: meaningful comparisons anyway, and trying all ~61 stations at up to 60s
-#: timeout each could stall a run for close to an hour.
-MAX_NMDB_FALLBACK_CANDIDATES = 8
-
 
 class SourcesError(ValueError):
     """Raised when --sources names a source that isn't recognized."""
@@ -177,12 +170,14 @@ def fetch_nmdb_with_fallback(
     station code, so trying the next station is a genuine new lookup rather
     than a repeat of the same cached miss.
 
-    The fallback loop tries at most ``MAX_NMDB_FALLBACK_CANDIDATES`` stations
-    total (including the originally-chosen one): stations ranked beyond that
-    are poor rigidity matches and not a physically meaningful comparison, and
-    bounding the search also bounds worst-case latency during a total NMDB
-    outage. An explicit ``--nmdb-station`` override is unaffected -- it tries
-    only that one station, with no iteration and so no cap.
+    The fallback loop tries every rigidity-ranked candidate station in turn
+    (skipping the originally-chosen one, since it was already tried) until
+    one returns data or the ranking is exhausted. There is no cap: for the
+    real dataset the only station with data for a given run can rank far
+    down the list (e.g. OULU at rank ~29), so bounding the search would
+    routinely report NMDB as unavailable on real runs. An explicit
+    ``--nmdb-station`` override is unaffected -- it tries only that one
+    station, with no iteration.
 
     ``fetch_fn`` takes a station code and returns an ``ExternalSeries``,
     raising ``FetchError`` when that station has no usable data. It is
@@ -230,13 +225,9 @@ def fetch_nmdb_with_fallback(
             "trying next-best rigidity match".format(station.code, exc)
         )
 
-    tried = 1  # the originally-chosen station above counts toward the cap
     for candidate in rank_by_rigidity(detector_rigidity_gv):
         if candidate.code == station.code:
             continue
-        if tried >= MAX_NMDB_FALLBACK_CANDIDATES:
-            break
-        tried += 1
         try:
             series = fetch_fn(candidate.code)
         except FetchError as exc:
@@ -253,10 +244,8 @@ def fetch_nmdb_with_fallback(
         return series, candidate, [], trail
 
     trail.append(
-        "nmdb: no data among the {0} closest rigidity-matched stations for "
-        "this run window; NMDB comparison unavailable".format(
-            MAX_NMDB_FALLBACK_CANDIDATES
-        )
+        "nmdb: no data at any rigidity-matched station for this run window; "
+        "NMDB comparison unavailable"
     )
     return None, station, trail, []
 

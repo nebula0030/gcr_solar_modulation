@@ -224,37 +224,47 @@ def test_explicit_override_does_not_fall_back():
     assert notes == []
 
 
-def test_fallback_caps_attempts_at_max_candidates():
-    """A total NMDB outage must not iterate all ~61 stations -- Finding 3."""
+def test_fallback_reaches_a_deeply_ranked_station_when_all_closer_ones_fail():
+    """The fallback search is unbounded -- for the real dataset the only
+    station with data (OULU) ranks 29th by rigidity for a Sunnyvale
+    detector, so a capped search would report NMDB as unavailable on every
+    real run. This stubs every candidate ranked ahead of OULU as failing and
+    asserts the loop still reaches OULU rather than giving up early.
+    """
     station, rigidity, _ = select_station(*SUNNYVALE)
+    ranked = process_data.rank_by_rigidity(rigidity)
+    oulu_rank = next(i for i, s in enumerate(ranked) if s.code == "OULU")
+    assert oulu_rank >= 20  # sanity check: genuinely deep in the ranking
 
     calls = []
 
     def fetch_fn(code):
         calls.append(code)
+        if code == "OULU":
+            return _series("OULU")
         raise FetchError("no data for {0}".format(code))
 
     series, used, warnings, notes = fetch_nmdb_with_fallback(
         station, rigidity, None, fetch_fn
     )
 
-    assert series is None
-    assert len(calls) == process_data.MAX_NMDB_FALLBACK_CANDIDATES
-    assert any(
-        str(process_data.MAX_NMDB_FALLBACK_CANDIDATES) in w for w in warnings
-    )
+    assert series is not None
+    assert used.code == "OULU"
+    assert calls[-1] == "OULU"
+    assert len(calls) == oulu_rank + 1  # every closer candidate was tried
+    # A successful (if deep) fallback is still a NOTE, not a warning.
+    assert any("OULU" in n for n in notes)
+    assert warnings == []
 
 
 def test_main_falls_back_and_reports_the_station_actually_used(
     tmp_path, capsys, monkeypatch
 ):
     """Mirrors the live Task 6 finding: UFSZ has no data, a next-best
-    rigidity match does. Finding 3 caps the fallback search to the top
-    ``MAX_NMDB_FALLBACK_CANDIDATES`` rigidity-ranked stations, so the stub
-    below succeeds on ZUGS -- the very next-best match after UFSZ for a
-    Sunnyvale detector, well inside that cap (the live OULU case is much
-    further down the rigidity ranking and is covered separately by the
-    cap-related tests).
+    rigidity match does. The stub below succeeds on ZUGS -- the very
+    next-best match after UFSZ for a Sunnyvale detector (the live OULU case
+    is much further down the rigidity ranking and is covered separately by
+    the deep-fallback test).
 
     Finding 1: a successful fallback must be reported as a NOTE, not a
     FAIL/Unavailable -- both in the printed summary and in the plot footer.
@@ -311,7 +321,10 @@ def test_main_falls_back_and_reports_the_station_actually_used(
 def test_main_continues_offline_when_all_nmdb_candidates_fail(
     tmp_path, capsys, monkeypatch
 ):
-    """Finding 3: a total outage must be bounded, not try every station."""
+    """A total NMDB outage must still let the run complete offline: every
+    rigidity-ranked candidate is tried (there is no cap), and once they are
+    all exhausted the run continues with NMDB reported unavailable.
+    """
     calls = []
 
     def fake_fetch_nmdb(start, end, station_code, bin_length_s, cache):
@@ -332,7 +345,9 @@ def test_main_continues_offline_when_all_nmdb_candidates_fail(
 
     assert code == 0
     assert "NMDB comparison unavailable" in out
-    assert len(calls) <= process_data.MAX_NMDB_FALLBACK_CANDIDATES
+    # No cap: every station in the ranking was tried before giving up.
+    all_codes = {s.code for s in process_data.rank_by_rigidity(0.0)}
+    assert set(calls) == all_codes
     produced = sorted(p.name for p in tmp_path.glob("*.html"))
     assert any(n.endswith("_overlay.html") for n in produced)
     assert any(n.endswith("_sidebyside.html") for n in produced)
