@@ -39,6 +39,17 @@ ALL_SOURCES = ("nmdb", "goes", "kp", "sunspot")
 
 OPEN_METEO_ARCHIVE_URL = "https://archive-api.open-meteo.com/v1/archive"
 
+#: Cap on how many rigidity-ranked candidate stations the NMDB fallback loop
+#: will try (including the originally-chosen station) before giving up.
+#: Stations beyond this are poor rigidity matches and not physically
+#: meaningful comparisons anyway, and trying all ~61 stations at up to 60s
+#: timeout each could stall a run for close to an hour.
+MAX_NMDB_FALLBACK_CANDIDATES = 8
+
+
+class SourcesError(ValueError):
+    """Raised when --sources names a source that isn't recognized."""
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -155,7 +166,7 @@ def fetch_nmdb_with_fallback(
     detector_rigidity_gv: float,
     override_code: Optional[str],
     fetch_fn: Callable[[str], ExternalSeries],
-) -> Tuple[Optional[ExternalSeries], Station, List[str]]:
+) -> Tuple[Optional[ExternalSeries], Station, List[str], List[str]]:
     """Fetch NMDB data for ``station``, falling back through the next-best
     rigidity-ranked stations if it has no data for the run window.
 
@@ -165,6 +176,13 @@ def fetch_nmdb_with_fallback(
     "no data" is a 200 that DOES get cached, but the cache key includes the
     station code, so trying the next station is a genuine new lookup rather
     than a repeat of the same cached miss.
+
+    The fallback loop tries at most ``MAX_NMDB_FALLBACK_CANDIDATES`` stations
+    total (including the originally-chosen one): stations ranked beyond that
+    are poor rigidity matches and not a physically meaningful comparison, and
+    bounding the search also bounds worst-case latency during a total NMDB
+    outage. An explicit ``--nmdb-station`` override is unaffected -- it tries
+    only that one station, with no iteration and so no cap.
 
     ``fetch_fn`` takes a station code and returns an ``ExternalSeries``,
     raising ``FetchError`` when that station has no usable data. It is
@@ -177,51 +195,70 @@ def fetch_nmdb_with_fallback(
     substituting a different station would silently ignore the user's
     request.
 
-    Returns ``(series_or_None, station_used, warnings)``. ``station_used`` is
-    the station whose data (if any) is in ``series_or_None``, so callers can
-    make the summary and plot metadata reflect what was actually used rather
-    than what was first chosen.
+    Returns ``(series_or_None, station_used, warnings, notes)``.
+    ``station_used`` is the station whose data (if any) is in
+    ``series_or_None``, so callers can make the summary and plot metadata
+    reflect what was actually used rather than what was first chosen.
+
+    Whether a given run's fallback trail is reported as ``warnings`` or as
+    ``notes`` is decided by the *outcome*, not by each individual step: if
+    the fallback ultimately finds data, the whole trail (the first-choice
+    station having no data, any stations tried and skipped in between, and
+    the final station that worked) is purely informational -- the run
+    succeeded, it just wasn't the first-choice station, and for the real
+    dataset that happens on every run, so none of it should read as a
+    failure. Only when every candidate is exhausted without finding data
+    does that same trail become ``warnings``, because at that point NMDB
+    genuinely has nothing to offer for this run. The explicit-override path
+    is simpler: a failure there is unconditionally a warning, since no
+    fallback is attempted and the requested station is definitely
+    unavailable.
     """
-    warnings: List[str] = []
+    trail: List[str] = []
     try:
         series = fetch_fn(station.code)
-        return series, station, warnings
+        return series, station, [], []
     except FetchError as exc:
         if override_code is not None:
-            warnings.append(
+            return None, station, [
                 "nmdb: station {0} has no data for this run window ({1}); "
                 "not falling back because it was explicitly requested via "
                 "--nmdb-station".format(station.code, exc)
-            )
-            return None, station, warnings
-        warnings.append(
+            ], []
+        trail.append(
             "nmdb: station {0} has no data for this run window ({1}); "
             "trying next-best rigidity match".format(station.code, exc)
         )
 
+    tried = 1  # the originally-chosen station above counts toward the cap
     for candidate in rank_by_rigidity(detector_rigidity_gv):
         if candidate.code == station.code:
             continue
+        if tried >= MAX_NMDB_FALLBACK_CANDIDATES:
+            break
+        tried += 1
         try:
             series = fetch_fn(candidate.code)
         except FetchError as exc:
-            warnings.append(
+            trail.append(
                 "nmdb: station {0} also has no data ({1})".format(
                     candidate.code, exc
                 )
             )
             continue
-        warnings.append(
+        trail.append(
             "nmdb: falling back from {0} to {1} ({2}), which has data for "
             "this run window".format(station.code, candidate.code, candidate.name)
         )
-        return series, candidate, warnings
+        return series, candidate, [], trail
 
-    warnings.append(
-        "nmdb: no candidate station had data for this run window; "
-        "NMDB comparison unavailable"
+    trail.append(
+        "nmdb: no data among the {0} closest rigidity-matched stations for "
+        "this run window; NMDB comparison unavailable".format(
+            MAX_NMDB_FALLBACK_CANDIDATES
+        )
     )
-    return None, station, warnings
+    return None, station, trail, []
 
 
 def gather_external(
@@ -230,19 +267,26 @@ def gather_external(
     station: Station,
     detector_rigidity: float,
     cache: Cache,
-) -> Tuple[List[AlignedSeries], List[str], Station]:
+) -> Tuple[List[AlignedSeries], List[str], List[str], Station]:
     """Fetch and align every requested external source.
 
     Failures are collected as warnings rather than raised, so one dead
     endpoint cannot stop the run. NMDB additionally falls back through
     rigidity-ranked candidate stations (see ``fetch_nmdb_with_fallback``);
-    the station actually used is returned as the third element so the
-    caller's summary and plot metadata can reflect it.
+    the station actually used is returned as the fourth element so the
+    caller's summary and plot metadata can reflect it. A successful
+    fallback is reported via the third element, ``notes`` -- it succeeded,
+    it just isn't the first-choice station, so it must not be rendered
+    alongside genuine failures.
+
+    Raises ``SourcesError`` if ``args.sources`` names anything outside
+    ``ALL_SOURCES``; the caller (``main``) turns that into a clean nonzero
+    exit rather than a raw ``SystemExit``.
     """
     requested = [s.strip().lower() for s in args.sources.split(",") if s.strip()]
     unknown = [s for s in requested if s not in ALL_SOURCES]
     if unknown:
-        raise SystemExit(
+        raise SourcesError(
             "unknown source(s): {0}; valid choices are {1}".format(
                 ", ".join(unknown), ", ".join(ALL_SOURCES)
             )
@@ -255,6 +299,7 @@ def gather_external(
 
     aligned: List[AlignedSeries] = []
     warnings: List[str] = []
+    notes: List[str] = []
     station_used = station
 
     fetchers = {
@@ -270,10 +315,11 @@ def gather_external(
             def nmdb_fetch_fn(code: str) -> ExternalSeries:
                 return fetch_nmdb(start, end, code, rs.bin_length_s, cache)
 
-            series, station_used, fb_warnings = fetch_nmdb_with_fallback(
+            series, station_used, fb_warnings, fb_notes = fetch_nmdb_with_fallback(
                 station, detector_rigidity, args.nmdb_station, nmdb_fetch_fn
             )
             warnings.extend(fb_warnings)
+            notes.extend(fb_notes)
             if series is not None:
                 aligned.append(align_to_bins(series, rs))
             continue
@@ -285,7 +331,7 @@ def gather_external(
             continue
         aligned.append(align_to_bins(series, rs))
 
-    return aligned, warnings, station_used
+    return aligned, warnings, notes, station_used
 
 
 def format_summary(
@@ -297,6 +343,7 @@ def format_summary(
     candidates: List[Station],
     aligned: List[AlignedSeries],
     warnings: List[str],
+    notes: List[str],
     args: argparse.Namespace,
     clock_drift_s: float,
 ) -> str:
@@ -372,6 +419,8 @@ def format_summary(
                                  n_valid, n_interp))
     else:
         lines.append("  (none retrieved)")
+    for note in notes:
+        lines.append("  NOTE {0}".format(note))
     for warning in warnings:
         lines.append("  FAIL {0}".format(warning))
     lines.append("")
@@ -465,14 +514,18 @@ def main(argv: Optional[List[str]] = None) -> int:
         print("error: {0}".format(exc), file=sys.stderr)
         return 2
 
-    aligned, warnings, station = gather_external(
-        args, rs, station, detector_rigidity, cache
-    )
+    try:
+        aligned, warnings, notes, station = gather_external(
+            args, rs, station, detector_rigidity, cache
+        )
+    except SourcesError as exc:
+        print("error: {0}".format(exc), file=sys.stderr)
+        return 2
     warnings = met_warnings + warnings
 
     summary = format_summary(
         args.input_file, rs, correction, station, detector_rigidity,
-        candidates, aligned, warnings, args, events.clock_drift_s,
+        candidates, aligned, warnings, notes, args, events.clock_drift_s,
     )
     print(summary)
 
@@ -494,6 +547,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         "not the atmospheric temperature effect.",
         NMDB_ACKNOWLEDGEMENT,
     ]
+    footer_notes.extend("Note: " + n for n in notes)
     footer_notes.extend("Unavailable - " + w for w in warnings)
 
     meta = PlotMetadata(

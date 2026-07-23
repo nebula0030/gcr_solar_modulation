@@ -72,6 +72,25 @@ def test_bin_longer_than_run_exits_nonzero(capsys):
     assert "bin length" in capsys.readouterr().err.lower()
 
 
+def test_unknown_source_returns_nonzero_int_not_systemexit(tmp_path, capsys):
+    """Finding 2: main(argv) -> int must hold even for a bad --sources.
+
+    gather_external used to ``raise SystemExit`` directly, which breaks the
+    contract for programmatic callers (SystemExit propagates rather than
+    returning). It must come back as an ordinary int exit code instead.
+    """
+    path = os.path.join(FIXTURES, "sample_13col.txt")
+    code = main([
+        path, "--bin-length", "2",
+        "--correction-method", "literature", "--beta-p", "-0.13",
+        "--sources", "bogus",
+        "--cache-dir", str(tmp_path / "cache"),
+    ])
+    assert isinstance(code, int)
+    assert code != 0
+    assert "unknown source" in capsys.readouterr().err.lower()
+
+
 def test_offline_run_still_produces_both_plots(tmp_path):
     """With no external sources requested, the tool must still work."""
     path = os.path.join(FIXTURES, "sample_13col.txt")
@@ -150,7 +169,7 @@ def test_fallback_uses_next_best_station_when_first_has_no_data():
             raise FetchError("no usable data rows in the NMDB response")
         return _series(code)
 
-    series, used, warnings = fetch_nmdb_with_fallback(
+    series, used, warnings, notes = fetch_nmdb_with_fallback(
         station, rigidity, None, fetch_fn
     )
 
@@ -158,8 +177,13 @@ def test_fallback_uses_next_best_station_when_first_has_no_data():
     assert used.code != "UFSZ"
     assert calls[0] == "UFSZ"
     assert len(calls) == 2  # first station, then the very next-best match
-    assert any("falling back from UFSZ" in w for w in warnings)
-    assert any(used.code in w for w in warnings)
+    # The successful fallback is a NOTE, not a warning/failure: the run
+    # worked, just not with the first-choice station.
+    assert any("falling back from UFSZ" in n for n in notes)
+    assert any(used.code in n for n in notes)
+    # A successful fallback's whole trail (including the first-choice
+    # station having had no data) is informational, not a warning.
+    assert warnings == []
 
 
 def test_fallback_reports_unavailable_when_every_candidate_fails():
@@ -168,12 +192,13 @@ def test_fallback_reports_unavailable_when_every_candidate_fails():
     def fetch_fn(code):
         raise FetchError("no data for {0}".format(code))
 
-    series, used, warnings = fetch_nmdb_with_fallback(
+    series, used, warnings, notes = fetch_nmdb_with_fallback(
         station, rigidity, None, fetch_fn
     )
 
     assert series is None
     assert any("unavailable" in w for w in warnings)
+    assert notes == []
 
 
 def test_explicit_override_does_not_fall_back():
@@ -185,7 +210,7 @@ def test_explicit_override_does_not_fall_back():
         calls.append(code)
         raise FetchError("no usable data rows in the NMDB response")
 
-    series, used, warnings = fetch_nmdb_with_fallback(
+    series, used, warnings, notes = fetch_nmdb_with_fallback(
         station, rigidity, "UFSZ", fetch_fn
     )
 
@@ -196,19 +221,60 @@ def test_explicit_override_does_not_fall_back():
         "not falling back" in w or "explicitly requested" in w
         for w in warnings
     )
+    assert notes == []
+
+
+def test_fallback_caps_attempts_at_max_candidates():
+    """A total NMDB outage must not iterate all ~61 stations -- Finding 3."""
+    station, rigidity, _ = select_station(*SUNNYVALE)
+
+    calls = []
+
+    def fetch_fn(code):
+        calls.append(code)
+        raise FetchError("no data for {0}".format(code))
+
+    series, used, warnings, notes = fetch_nmdb_with_fallback(
+        station, rigidity, None, fetch_fn
+    )
+
+    assert series is None
+    assert len(calls) == process_data.MAX_NMDB_FALLBACK_CANDIDATES
+    assert any(
+        str(process_data.MAX_NMDB_FALLBACK_CANDIDATES) in w for w in warnings
+    )
 
 
 def test_main_falls_back_and_reports_the_station_actually_used(
     tmp_path, capsys, monkeypatch
 ):
-    """Mirrors the live Task 6 finding: UFSZ has no data, OULU does."""
+    """Mirrors the live Task 6 finding: UFSZ has no data, a next-best
+    rigidity match does. Finding 3 caps the fallback search to the top
+    ``MAX_NMDB_FALLBACK_CANDIDATES`` rigidity-ranked stations, so the stub
+    below succeeds on ZUGS -- the very next-best match after UFSZ for a
+    Sunnyvale detector, well inside that cap (the live OULU case is much
+    further down the rigidity ranking and is covered separately by the
+    cap-related tests).
+
+    Finding 1: a successful fallback must be reported as a NOTE, not a
+    FAIL/Unavailable -- both in the printed summary and in the plot footer.
+    """
 
     def fake_fetch_nmdb(start, end, station_code, bin_length_s, cache):
-        if station_code == "OULU":
-            return _series("OULU")
+        if station_code == "ZUGS":
+            return _series("ZUGS")
         raise FetchError("no usable data rows in the NMDB response")
 
     monkeypatch.setattr(process_data, "fetch_nmdb", fake_fetch_nmdb)
+
+    captured_meta = {}
+    real_build_overlay = process_data.build_overlay
+
+    def spy_build_overlay(rs, correction, aligned, meta):
+        captured_meta["meta"] = meta
+        return real_build_overlay(rs, correction, aligned, meta)
+
+    monkeypatch.setattr(process_data, "build_overlay", spy_build_overlay)
 
     path = os.path.join(FIXTURES, "sample_13col.txt")
     code = main([
@@ -221,8 +287,22 @@ def test_main_falls_back_and_reports_the_station_actually_used(
     out = capsys.readouterr().out
 
     assert code == 0
-    assert "falling back from UFSZ to OULU" in out
-    assert "Selected:       OULU" in out
+    assert "falling back from UFSZ to ZUGS" in out
+    assert "Selected:       ZUGS" in out
+
+    # The fallback succeeded -- it must not be rendered as a failure.
+    fallback_lines = [
+        line for line in out.splitlines() if "falling back from UFSZ" in line
+    ]
+    assert fallback_lines
+    assert all("FAIL" not in line for line in fallback_lines)
+    assert any(line.strip().startswith("NOTE") for line in fallback_lines)
+    assert "OK   Neutron monitor (ZUGS)" in out
+
+    footer = "<br>".join(captured_meta["meta"].footer_notes)
+    assert "Unavailable" not in footer
+    assert "falling back from UFSZ to ZUGS" in footer
+
     produced = sorted(p.name for p in tmp_path.glob("*.html"))
     assert any(n.endswith("_overlay.html") for n in produced)
     assert any(n.endswith("_sidebyside.html") for n in produced)
@@ -231,7 +311,11 @@ def test_main_falls_back_and_reports_the_station_actually_used(
 def test_main_continues_offline_when_all_nmdb_candidates_fail(
     tmp_path, capsys, monkeypatch
 ):
+    """Finding 3: a total outage must be bounded, not try every station."""
+    calls = []
+
     def fake_fetch_nmdb(start, end, station_code, bin_length_s, cache):
+        calls.append(station_code)
         raise FetchError("no usable data rows in the NMDB response")
 
     monkeypatch.setattr(process_data, "fetch_nmdb", fake_fetch_nmdb)
@@ -248,6 +332,7 @@ def test_main_continues_offline_when_all_nmdb_candidates_fail(
 
     assert code == 0
     assert "NMDB comparison unavailable" in out
+    assert len(calls) <= process_data.MAX_NMDB_FALLBACK_CANDIDATES
     produced = sorted(p.name for p in tmp_path.glob("*.html"))
     assert any(n.endswith("_overlay.html") for n in produced)
     assert any(n.endswith("_sidebyside.html") for n in produced)
