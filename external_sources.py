@@ -380,6 +380,25 @@ def parse_goes_live_json(payload: bytes) -> Tuple[np.ndarray, np.ndarray]:
     return times, values
 
 
+#: Matches the version suffix of a GOES archive filename, e.g. "2-10-0" out
+#: of "..._v2-10-0.nc".
+_GOES_VERSION_RE = re.compile(r"_v(\d+(?:-\d+)*)\.nc$")
+
+
+def _goes_version_key(filename: str) -> Tuple[int, ...]:
+    """Numeric sort key for a GOES archive filename's version suffix.
+
+    Comparing filenames as strings is wrong: "v2-2-1" sorts after
+    "v2-10-0" lexicographically even though 2-10-0 is the newer version.
+    A filename whose version cannot be parsed sorts lowest, so it never
+    wins over a well-formed name and discovery never crashes on it.
+    """
+    match = _GOES_VERSION_RE.search(filename)
+    if match is None:
+        return (-1,)
+    return tuple(int(part) for part in match.group(1).split("-"))
+
+
 def discover_goes_archive_url(
     year: int, month: int, day: int, cache: Cache
 ) -> str:
@@ -405,7 +424,40 @@ def discover_goes_archive_url(
                 year, month, day, directory
             )
         )
-    return directory + sorted(set(matches))[-1]
+    winner = max(set(matches), key=_goes_version_key)
+    return directory + winner
+
+
+def _decode_goes_netcdf(path: str) -> Tuple[np.ndarray, np.ndarray]:
+    """Decode one archived netCDF file into (times, long-band flux).
+
+    Pure function of a filesystem path so it can be exercised offline with
+    a synthetic file. netCDF4 returns a masked array wherever a sample is
+    the fill-value sentinel; ``np.ma.filled`` turns those into NaN (instead
+    of leaking the raw sentinel, which ``np.asarray`` would do) so the
+    existing finiteness filter drops them regardless of the sentinel's
+    sign. The same treatment applies to ``time`` so a masked timestamp
+    cannot silently map to epoch+NaN.
+    """
+    import netCDF4
+
+    dataset = netCDF4.Dataset(path)
+    try:
+        raw_flux = dataset.variables["xrsb_flux"][:]
+        flux = np.ma.filled(raw_flux.astype("float64"), np.nan)
+        raw_seconds = dataset.variables["time"][:]
+        seconds = np.ma.filled(raw_seconds.astype("float64"), np.nan)
+    finally:
+        dataset.close()
+
+    good = np.isfinite(flux) & np.isfinite(seconds) & (flux > 0)
+    seconds = seconds[good]
+    flux = flux[good]
+
+    # GOES-R archive time is seconds since 2000-01-01 12:00:00 UTC.
+    epoch = np.datetime64("2000-01-01T12:00:00", "ns")
+    times = epoch + (seconds * 1e9).astype("timedelta64[ns]")
+    return times, flux
 
 
 def _read_goes_archive_day(
@@ -413,8 +465,6 @@ def _read_goes_archive_day(
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Download and read one archived netCDF day of long-band flux."""
     import tempfile
-
-    import netCDF4
 
     url = discover_goes_archive_url(year, month, day, cache)
     key = "goes-archive|{0}".format(url)
@@ -424,21 +474,9 @@ def _read_goes_archive_day(
         handle.write(payload)
         temp_path = handle.name
     try:
-        dataset = netCDF4.Dataset(temp_path)
-        try:
-            flux = np.asarray(dataset.variables["xrsb_flux"][:], dtype=np.float64)
-            time_var = dataset.variables["time"]
-            seconds = np.asarray(time_var[:], dtype=np.float64)
-            # GOES-R archive time is seconds since 2000-01-01 12:00:00 UTC.
-            epoch = np.datetime64("2000-01-01T12:00:00", "ns")
-            times = epoch + (seconds * 1e9).astype("timedelta64[ns]")
-        finally:
-            dataset.close()
+        return _decode_goes_netcdf(temp_path)
     finally:
         os.unlink(temp_path)
-
-    good = np.isfinite(flux) & (flux > 0)
-    return times[good], flux[good]
 
 
 def fetch_goes_xray(
