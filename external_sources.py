@@ -187,3 +187,141 @@ def _to_datetime(value: np.datetime64):
 
     seconds = int(value.astype("datetime64[s]").astype(np.int64))
     return _dt.datetime(1970, 1, 1) + _dt.timedelta(seconds=seconds)
+
+
+# --------------------------------------------------------------------------
+# Geomagnetic Kp index (GFZ Potsdam)
+# --------------------------------------------------------------------------
+
+#: The kp.gfz-potsdam.de host 301-redirects here; use the new host directly.
+KP_URL = "https://kp.gfz.de/app/json/"
+
+
+def parse_kp_json(payload: bytes) -> Tuple[np.ndarray, np.ndarray]:
+    """Parse the GFZ Kp JSON payload into (times, values)."""
+    import json
+
+    try:
+        data = json.loads(payload.decode("utf-8", errors="replace"))
+    except ValueError as exc:
+        raise FetchError("Kp response was not valid JSON: {0}".format(exc))
+
+    if not isinstance(data, dict) or "Kp" not in data or "datetime" not in data:
+        raise FetchError(
+            "Kp response missing 'Kp' or 'datetime' keys; got "
+            "{0}".format(sorted(data) if isinstance(data, dict) else type(data))
+        )
+
+    raw_values = data["Kp"]
+    raw_times = data["datetime"]
+    if len(raw_values) != len(raw_times):
+        raise FetchError(
+            "Kp response has {0} values but {1} timestamps".format(
+                len(raw_values), len(raw_times)
+            )
+        )
+    if not raw_values:
+        raise FetchError("Kp response contained no samples")
+
+    times = np.asarray(
+        [np.datetime64(t.replace("Z", ""), "ns") for t in raw_times],
+        dtype="datetime64[ns]",
+    )
+    values = np.asarray(raw_values, dtype=np.float64)
+    return times, values
+
+
+def fetch_kp(
+    start_utc: np.datetime64, end_utc: np.datetime64, cache: Cache
+) -> ExternalSeries:
+    """Fetch the 3-hourly planetary Kp index."""
+    start = _to_datetime(start_utc)
+    end = _to_datetime(end_utc)
+    params = {
+        "start": start.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "end": end.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "index": "Kp",
+    }
+    key = "kp|{0}|{1}".format(start, end)
+    payload = cache.get_or_fetch(key, lambda: http_get(KP_URL, params))
+    times, values = parse_kp_json(payload)
+    return ExternalSeries(
+        name="Kp index",
+        units="Kp (0-9)",
+        source="GFZ Potsdam",
+        utc=times,
+        values=values,
+    )
+
+
+# --------------------------------------------------------------------------
+# Sunspot number (SILSO, Royal Observatory of Belgium)
+# --------------------------------------------------------------------------
+
+SILSO_URL = "https://www.sidc.be/SILSO/DATA/EISN/EISN_current.csv"
+
+#: SILSO writes -1 where no value is available.
+_SILSO_MISSING = -1.0
+
+
+def parse_silso_csv(text: str) -> Tuple[np.ndarray, np.ndarray]:
+    """Parse SILSO's daily estimated sunspot number CSV.
+
+    Columns are: year, month, day, decimal year, value, stddev, ...
+    """
+    times: List[np.datetime64] = []
+    values: List[float] = []
+    for line in text.splitlines():
+        parts = [p.strip() for p in line.split(",")]
+        if len(parts) < 5:
+            continue
+        try:
+            year, month, day = int(parts[0]), int(parts[1]), int(parts[2])
+            value = float(parts[4])
+        except ValueError:
+            continue
+        if value <= _SILSO_MISSING:
+            continue
+        times.append(
+            np.datetime64("{0:04d}-{1:02d}-{2:02d}".format(year, month, day), "ns")
+        )
+        values.append(value)
+
+    if not times:
+        raise FetchError("no usable rows in the SILSO response")
+
+    return np.asarray(times, dtype="datetime64[ns]"), np.asarray(
+        values, dtype=np.float64
+    )
+
+
+def fetch_sunspot(
+    start_utc: np.datetime64, end_utc: np.datetime64, cache: Cache
+) -> ExternalSeries:
+    """Fetch daily estimated international sunspot number.
+
+    SILSO serves one rolling file rather than a date-range query, so the
+    whole file is cached and then trimmed to the requested window.
+    """
+    key = "silso|current"
+    payload = cache.get_or_fetch(key, lambda: http_get(SILSO_URL))
+    times, values = parse_silso_csv(payload.decode("utf-8", errors="replace"))
+
+    # Widen by a day each side so alignment has neighbours to interpolate from.
+    lo = start_utc - np.timedelta64(1, "D")
+    hi = end_utc + np.timedelta64(1, "D")
+    inside = (times >= lo) & (times <= hi)
+    if not np.any(inside):
+        raise FetchError(
+            "SILSO has no sunspot data covering {0} to {1}".format(
+                start_utc, end_utc
+            )
+        )
+
+    return ExternalSeries(
+        name="Sunspot number",
+        units="SSN",
+        source="SILSO / Royal Observatory of Belgium",
+        utc=times[inside],
+        values=values[inside],
+    )
