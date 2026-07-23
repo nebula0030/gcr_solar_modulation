@@ -53,31 +53,66 @@ def test_live_window_is_seven_days():
     assert GOES_LIVE_WINDOW_DAYS == 7
 
 
+# netCDF4's real default fill value for an f8 variable. This MUST be
+# positive: the production filter is `flux > 0`, so a negative sentinel
+# (e.g. -9999.0) would be screened out by that comparison even under the
+# old, broken decode logic (`np.asarray` instead of `np.ma.filled`), which
+# made a negative-sentinel test pass for the wrong reason -- it never
+# exercised the code path it was meant to guard. A positive sentinel this
+# large is still a finite float, so `np.isfinite(...) & (flux > 0)` alone
+# cannot screen it out; only properly filling masked entries with NaN
+# (the fix) does.
+POSITIVE_FILL = 9.969209968386869e36
+
+
 def _write_synthetic_goes_netcdf(path):
     """Write a tiny netCDF file shaped like a GOES-R archive day.
 
-    One sample is valid; the other is written through the variable's
-    fill-value so netCDF4 reports it as masked on read back -- exactly the
-    "missing sample" case Finding 1 is about.
+    Three samples, each pinning a different case:
+      index 0: fully valid -- flux and time both real, time == 0 (epoch).
+      index 1: flux written through the fill-value sentinel, so netCDF4
+        reports it as masked on read back -- the "missing sample" case
+        Finding 1 is about.
+      index 2: time written through the fill-value sentinel instead --
+        the masked-*time* case Finding 2 is about, so a masked time can't
+        silently map to epoch + garbage.
     """
     dataset = netCDF4.Dataset(path, "w")
     try:
         dataset.createDimension("time", None)
         flux_var = dataset.createVariable(
-            "xrsb_flux", "f8", ("time",), fill_value=-9999.0
+            "xrsb_flux", "f8", ("time",), fill_value=POSITIVE_FILL
         )
-        time_var = dataset.createVariable("time", "f8", ("time",))
+        time_var = dataset.createVariable(
+            "time", "f8", ("time",), fill_value=POSITIVE_FILL
+        )
         time_var.units = "seconds since 2000-01-01 12:00:00 UTC"
-        # index 0: valid sample, exactly at the epoch (time=0).
-        # index 1: left unset so it reads back through the fill value.
         flux_var[0] = 4.2e-07
-        time_var[:] = [0.0, 60.0]
+        flux_var[2] = 6.6e-07
+        time_var[:] = [0.0, 60.0, 120.0]
+        # Overwrite the two sentinel slots explicitly (rather than relying
+        # on them being left unset) so the intent is unambiguous: these
+        # two entries are masked on purpose, each in a different variable.
+        flux_var[1] = POSITIVE_FILL
+        time_var[2] = POSITIVE_FILL
     finally:
         dataset.close()
 
 
 def test_decode_goes_netcdf_drops_fill_values_and_decodes_noon_epoch(tmp_path):
-    """Pins Finding 1: masked flux is dropped, and t=0 decodes to noon."""
+    """Pins Finding 1 and Finding 2.
+
+    Finding 1: a sample whose *flux* reads back masked (index 1) is
+    dropped, using a POSITIVE fill sentinel so the assertion actually
+    depends on the mask being filled with NaN rather than on the `flux >
+    0` filter incidentally catching a negative sentinel.
+
+    Finding 2: a sample whose *time* reads back masked (index 2) is also
+    dropped, so a masked time cannot silently decode to epoch + garbage.
+
+    Only index 0 should survive, and t=0 there must decode to NOON (the
+    GOES-R epoch), not midnight.
+    """
     path = str(tmp_path / "synthetic.nc")
     _write_synthetic_goes_netcdf(path)
 

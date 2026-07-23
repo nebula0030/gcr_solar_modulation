@@ -392,6 +392,9 @@ def _goes_version_key(filename: str) -> Tuple[int, ...]:
     "v2-10-0" lexicographically even though 2-10-0 is the newer version.
     A filename whose version cannot be parsed sorts lowest, so it never
     wins over a well-formed name and discovery never crashes on it.
+    If every candidate is unparseable, they all tie at this same lowest
+    key, and ``max()`` returns an arbitrary one of them rather than any
+    guaranteed order.
     """
     match = _GOES_VERSION_RE.search(filename)
     if match is None:
