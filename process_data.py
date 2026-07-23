@@ -350,7 +350,16 @@ def format_summary(
     lines.append("  Complete bins:  {0}".format(len(rs.counts)))
     lines.append("  Events used:    Flag == 1 (coincident) only, {0} total"
                  .format(int(rs.counts.sum())))
-    lines.append("  Mean raw rate:  {0:.4f} Hz".format(float(rs.rate_hz.mean())))
+    # nanmean warns and returns nan if every bin is dead (all-NaN slice);
+    # that degenerate case is acceptable, just skip the call to keep the
+    # summary output quiet (format_summary's own ``warnings`` parameter
+    # shadows the stdlib ``warnings`` module, so silencing via
+    # catch_warnings isn't available here).
+    if np.any(np.isfinite(rs.rate_hz)):
+        mean_raw_rate = float(np.nanmean(rs.rate_hz))
+    else:
+        mean_raw_rate = float("nan")
+    lines.append("  Mean raw rate:  {0:.4f} Hz".format(mean_raw_rate))
     lines.append("  Poisson error:  {0:.2f}% per bin (mean)"
                  .format(rs.mean_fractional_error * 100.0))
     if rs.mean_fractional_error > 0.03:

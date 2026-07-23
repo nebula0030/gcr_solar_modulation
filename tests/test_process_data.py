@@ -6,9 +6,11 @@ import numpy as np
 import pytest
 
 import process_data
+from correction import CorrectionResult
 from external_sources import ExternalSeries, FetchError
-from nmdb_stations import select_station
-from process_data import build_parser, fetch_nmdb_with_fallback, main
+from nmdb_stations import Station, select_station
+from process_data import build_parser, fetch_nmdb_with_fallback, format_summary, main
+from rate import RateSeries
 
 FIXTURES = os.path.join(os.path.dirname(__file__), "fixtures")
 SUNNYVALE = (37.3688, -122.0363)
@@ -379,3 +381,83 @@ def test_main_explicit_override_with_no_data_is_reported_not_replaced(
     assert calls == ["UFSZ"]  # never tried a fallback station
     assert "Selected:       UFSZ" in out
     assert "not falling back" in out or "explicitly requested" in out
+
+
+# ---------------------------------------------------------------------------
+# Finding 1: mean raw rate must not print "nan" when a bin is dead
+#
+# rate_hz carries np.nan for dead bins (livetime <= 0, see rate.py). Every
+# other reduction over rate_hz in the codebase guards NaN (mean_fractional_
+# error masks with isfinite, plotting.build_overlay uses np.nanmean); the
+# summary's "Mean raw rate" line used a plain .mean(), which goes nan the
+# moment any single bin is dead. This exercises format_summary directly with
+# a RateSeries that has one dead (NaN) bin among otherwise-good bins.
+# ---------------------------------------------------------------------------
+
+
+def _rate_series_with_one_dead_bin() -> RateSeries:
+    n = 4
+    bin_length_s = 60.0
+    start = np.datetime64("2026-07-10T00:00:00", "ns")
+    offsets = (np.arange(n) * bin_length_s * 1e9).astype("timedelta64[ns]")
+    bin_start_utc = start + offsets
+    bin_mid_utc = bin_start_utc + np.timedelta64(int(bin_length_s * 1e9 / 2), "ns")
+
+    rate_hz = np.array([1.0, np.nan, 1.2, 0.9])
+    rate_err_hz = np.array([0.1, np.nan, 0.11, 0.09])
+
+    return RateSeries(
+        bin_start_utc=bin_start_utc,
+        bin_mid_utc=bin_mid_utc,
+        counts=np.array([60, 0, 72, 54], dtype=np.int64),
+        livetime_s=np.array([60.0, 0.0, 60.0, 60.0]),
+        rate_hz=rate_hz,
+        rate_err_hz=rate_err_hz,
+        press_hpa=np.full(n, 1013.0),
+        temp_c=np.full(n, 20.0),
+        bin_length_s=bin_length_s,
+    )
+
+
+def _minimal_correction_result() -> CorrectionResult:
+    return CorrectionResult(
+        corrected_rate_hz=np.array([1.0, np.nan, 1.2, 0.9]),
+        corrected_err_hz=np.array([0.1, np.nan, 0.11, 0.09]),
+        beta_p=-0.0018,
+        beta_t=0.0,
+        beta_p_err=0.0002,
+        beta_t_err=0.0,
+        r_squared=0.5,
+        p0_hpa=1013.0,
+        t0_c=20.0,
+        method="fit",
+    )
+
+
+def test_summary_mean_raw_rate_is_finite_when_a_bin_is_dead():
+    rs = _rate_series_with_one_dead_bin()
+    assert np.isnan(rs.rate_hz).any()  # sanity: the scenario actually has a dead bin
+
+    station = Station("OULU", "Oulu", 0.81, 15)
+    args = build_parser().parse_args(["f.txt", "--bin-length", "60"])
+
+    summary = format_summary(
+        input_file="f.txt",
+        rs=rs,
+        correction=_minimal_correction_result(),
+        station=station,
+        detector_rigidity=5.0,
+        candidates=[station],
+        aligned=[],
+        warnings=[],
+        notes=[],
+        args=args,
+        clock_drift_s=0.0,
+    )
+
+    mean_line = next(
+        line for line in summary.splitlines() if "Mean raw rate:" in line
+    )
+    assert "nan" not in mean_line.lower()
+    # np.nanmean([1.0, 1.2, 0.9]) == 1.0333...
+    assert "1.0333" in mean_line
