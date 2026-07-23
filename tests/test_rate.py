@@ -101,11 +101,59 @@ def test_no_coincident_events_raises():
 
 
 def test_mean_fractional_error():
+    # Two complete 2 s bins with *different* known counts (100 and 300), so
+    # the test actually exercises averaging across bins rather than passing
+    # trivially on a single bin.
+    bin0 = [i * (2.0 / 100) for i in range(100)]  # 100 events in [0, 2)
+    bin1 = [2.0 + i * (2.0 / 300) for i in range(300)]  # 300 events in [2, 4)
     ev = make_events(
-        timestamps=[float(i) * 0.01 for i in range(400)],
-        flags=[1] * 400,
-        deadtimes=[0.0] * 400,
+        timestamps=bin0 + bin1 + [4.5],  # trailing point pushes span past 4 s
+        flags=[1] * 400 + [0],
+        deadtimes=[0.0] * 401,
     )
     rs = compute_rate(ev, bin_length_s=2.0)
-    # 200 counts per bin -> 1/sqrt(200) ~= 0.0707
-    assert rs.mean_fractional_error == pytest.approx(0.0707, abs=0.005)
+    assert rs.counts.tolist() == [100, 300]
+    assert rs.livetime_s.tolist() == pytest.approx([2.0, 2.0])
+
+    # Expected value computed explicitly from the known per-bin counts,
+    # independent of the rate_hz/rate_err_hz arrays under test.
+    frac0 = (np.sqrt(100) / 2.0) / (100 / 2.0)
+    frac1 = (np.sqrt(300) / 2.0) / (300 / 2.0)
+    expected = (frac0 + frac1) / 2.0
+    assert rs.mean_fractional_error == pytest.approx(expected)
+
+
+def test_dead_bin_livetime_is_nan_and_excluded_from_mean():
+    # 3 bins of 10 s. Bin 1's cumulative deadtime jumps by 15 s (more than
+    # the 10 s bin width), so that bin is unusable. Bins 0 and 2 have normal
+    # small deadtime increases and should be unaffected.
+    ev = make_events(
+        timestamps=[0.0, 2.0, 5.0, 8.0, 10.0, 12.0, 15.0, 18.0, 20.0, 22.0, 25.0, 28.0, 30.0],
+        flags=[1] * 13,
+        deadtimes=[0.0, 0.2, 0.5, 0.8, 1.0, 5.0, 10.0, 14.0, 16.0, 16.2, 16.5, 16.8, 17.0],
+    )
+    rs = compute_rate(ev, bin_length_s=10.0)
+    assert rs.counts.tolist() == [4, 4, 5]
+    assert rs.livetime_s[0] == pytest.approx(9.0)
+    assert rs.livetime_s[1] == pytest.approx(-5.0)  # diagnostic value preserved
+    assert rs.livetime_s[2] == pytest.approx(9.0)
+
+    assert np.isnan(rs.rate_hz[1])
+    assert np.isnan(rs.rate_err_hz[1])
+
+    assert np.isfinite(rs.rate_hz[0])
+    assert np.isfinite(rs.rate_hz[2])
+    assert rs.rate_hz[0] == pytest.approx(4 / 9.0)
+    assert rs.rate_hz[2] == pytest.approx(5 / 9.0)
+
+    frac0 = (np.sqrt(4) / 9.0) / (4 / 9.0)
+    frac2 = (np.sqrt(5) / 9.0) / (5 / 9.0)
+    expected = (frac0 + frac2) / 2.0
+    assert np.isfinite(rs.mean_fractional_error)
+    assert rs.mean_fractional_error == pytest.approx(expected)
+
+
+def test_empty_events_raises_rate_error():
+    ev = make_events([], [], [])
+    with pytest.raises(RateError):
+        compute_rate(ev, bin_length_s=10.0)

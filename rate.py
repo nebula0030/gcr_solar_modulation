@@ -36,8 +36,12 @@ class RateSeries:
 
     @property
     def mean_fractional_error(self) -> float:
-        """Mean Poisson error as a fraction of the rate."""
-        good = self.rate_hz > 0
+        """Mean Poisson error as a fraction of the rate.
+
+        Bins with a non-finite rate (dead bins where livetime was not
+        strictly positive) are excluded rather than poisoning the mean.
+        """
+        good = np.isfinite(self.rate_hz) & (self.rate_hz > 0)
         if not np.any(good):
             return float("nan")
         return float(np.mean(self.rate_err_hz[good] / self.rate_hz[good]))
@@ -53,6 +57,8 @@ def compute_rate(events: Events, bin_length_s: float) -> RateSeries:
         raise RateError("bin length must be positive, got {0}".format(bin_length_s))
 
     t = events.timestamp_s
+    if len(t) == 0:
+        raise RateError("no events in this run; cannot compute a rate")
     run_span = float(t[-1] - t[0])
     if bin_length_s > run_span:
         raise RateError(
@@ -63,6 +69,8 @@ def compute_rate(events: Events, bin_length_s: float) -> RateSeries:
 
     n_bins = int(np.floor(run_span / bin_length_s))
     if n_bins < 1:
+        # Defensive/unreachable: the bin_length_s > run_span guard above
+        # already rejects any bin_length_s that would floor to zero bins.
         raise RateError(
             "bin length {0:g} s yields no complete bins over {1:g} s".format(
                 bin_length_s, run_span
@@ -85,10 +93,19 @@ def compute_rate(events: Events, bin_length_s: float) -> RateSeries:
     deadtime_at_edges = np.interp(edges, t, events.deadtime_s)
     deadtime_per_bin = np.diff(deadtime_at_edges)
     livetime_s = bin_length_s - deadtime_per_bin
-    livetime_s = np.maximum(livetime_s, 1e-9)
 
-    rate_hz = counts / livetime_s
-    rate_err_hz = np.sqrt(counts) / livetime_s
+    # A bin whose livetime is not strictly positive (deadtime increase >=
+    # the bin width, i.e. the detector was effectively dead the whole bin)
+    # is not a real measurement. Mark its rate as NaN rather than clamping
+    # livetime to something tiny, which would fabricate an absurd rate and
+    # silently poison mean_fractional_error. counts/livetime_s are left as
+    # the actual computed values for diagnostics.
+    dead_bin = livetime_s <= 0
+    with np.errstate(divide="ignore", invalid="ignore"):
+        rate_hz = counts / livetime_s
+        rate_err_hz = np.sqrt(counts) / livetime_s
+    rate_hz = np.where(dead_bin, np.nan, rate_hz)
+    rate_err_hz = np.where(dead_bin, np.nan, rate_err_hz)
 
     press_hpa = _bin_mean(t, events.press_pa / 100.0, edges)
     temp_c = _bin_mean(t, events.temp_c, edges)
