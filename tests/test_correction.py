@@ -8,17 +8,21 @@ from rate import RateSeries
 
 
 def synthetic_series(beta_p, beta_t, n=400, base_rate=0.47, bin_length_s=86400.0,
-                     seed=1234):
+                     seed=1234, temp_amplitude=3.0):
     """Build a RateSeries whose rate follows a known log-linear P/T response.
 
     Daily bins are used deliberately. At 0.47 Hz a 24 h bin holds ~40k counts,
     so Poisson noise is ~0.5% against a ~1.4% injected P/T signal. With hourly
     bins the noise (~2.4%) would swamp the signal and the R-squared assertion
     below would fail even though the fit is correct.
+
+    ``temp_amplitude`` defaults to 3.0 C (the value every existing test
+    relies on); pass a smaller value to produce a poorly-constrained beta_T
+    fit without making temperature exactly constant.
     """
     rng = np.random.default_rng(seed)
     press = 1008.0 + 6.0 * np.sin(np.linspace(0, 6.0, n))
-    temp = 23.0 + 3.0 * np.sin(np.linspace(0, 9.0, n) + 0.7)
+    temp = 23.0 + temp_amplitude * np.sin(np.linspace(0, 9.0, n) + 0.7)
     p0, t0 = press.mean(), temp.mean()
 
     true_rate = base_rate * np.exp(beta_p * (press - p0) + beta_t * (temp - t0))
@@ -146,3 +150,56 @@ def test_correct_propagates_nan_rate_to_corrected_rate():
     result = correct(rs, method="fit")
     assert np.isnan(result.corrected_rate_hz[7])
     assert np.isnan(result.corrected_err_hz[7])
+
+
+def test_constant_pressure_raises_correction_error():
+    """A stuck/placeholder pressure sensor must not leak a LinAlgError."""
+    rs = synthetic_series(-0.0013, -0.004)
+    rs.press_hpa = np.full_like(rs.press_hpa, 1008.0)
+    with pytest.raises(CorrectionError) as exc:
+        fit_coefficients(rs)
+    assert "pressure" in str(exc.value).lower()
+
+    with pytest.raises(CorrectionError):
+        correct(rs, method="fit")
+
+
+def test_constant_temperature_raises_correction_error():
+    """A stuck/placeholder temperature sensor must not leak a LinAlgError."""
+    rs = synthetic_series(-0.0013, -0.004)
+    rs.temp_c = np.full_like(rs.temp_c, 23.0)
+    with pytest.raises(CorrectionError) as exc:
+        fit_coefficients(rs)
+    assert "temperature" in str(exc.value).lower()
+
+    with pytest.raises(CorrectionError):
+        correct(rs, method="fit")
+
+
+def test_constant_pressure_and_temperature_raises_correction_error():
+    """Degenerate case: both sensors stuck simultaneously must also raise."""
+    rs = synthetic_series(-0.0013, -0.004)
+    rs.press_hpa = np.full_like(rs.press_hpa, 1008.0)
+    rs.temp_c = np.full_like(rs.temp_c, 23.0)
+    with pytest.raises(CorrectionError):
+        fit_coefficients(rs)
+
+
+def test_beta_p_uncertainty_warning_fires_when_poorly_constrained():
+    """No real barometric signal (beta_p=0) against normal pressure spread
+    yields a fitted beta_p that is noise-dominated, i.e. a large relative
+    uncertainty -- verified numerically to exceed MAX_RELATIVE_COEFF_ERROR
+    for this fixture's default seed."""
+    rs = synthetic_series(0.0, -0.004)
+    result = correct(rs, method="fit")
+    assert any("beta_p" in w.lower() for w in result.warnings)
+
+
+def test_beta_t_uncertainty_warning_fires_when_poorly_constrained():
+    """A tiny (but nonzero, so the Finding-1 constant-temperature guard does
+    not trigger) temperature spread makes beta_T noise-dominated -- verified
+    numerically to exceed MAX_RELATIVE_COEFF_ERROR for this fixture's
+    default seed."""
+    rs = synthetic_series(-0.0013, -0.004, temp_amplitude=0.01)
+    result = correct(rs, method="fit")
+    assert any("beta_t" in w.lower() for w in result.warnings)

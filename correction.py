@@ -98,6 +98,27 @@ def fit_coefficients(
     y = np.log(rs.rate_hz[usable])
     w = np.sqrt(rs.counts[usable].astype(np.float64))
 
+    p_constant = np.ptp(p) == 0
+    t_constant = np.ptp(t) == 0
+    if p_constant and t_constant:
+        raise CorrectionError(
+            "pressure and temperature are both constant across the usable "
+            "bins, so beta_P and beta_T cannot be fit; check the pressure "
+            "and temperature sensors or use --correction-method literature."
+        )
+    if p_constant:
+        raise CorrectionError(
+            "pressure is constant across the usable bins, so beta_P cannot "
+            "be fit; check the pressure sensor or use "
+            "--correction-method literature."
+        )
+    if t_constant:
+        raise CorrectionError(
+            "temperature is constant across the usable bins, so beta_T "
+            "cannot be fit; check the temperature sensor or use "
+            "--correction-method literature."
+        )
+
     design = np.column_stack(
         [np.ones(usable.sum()), p - p.mean(), t - t.mean()]
     )
@@ -163,6 +184,15 @@ def correct(
                 "corrected rate with caution or supply a known coefficient "
                 "via --correction-method literature --beta-p.".format(
                     100.0 * abs(beta_p_err / beta_p)
+                )
+            )
+        if beta_t != 0 and abs(beta_t_err / beta_t) > MAX_RELATIVE_COEFF_ERROR:
+            warnings.append(
+                "Fitted beta_T has {0:.0f}% relative uncertainty; treat the "
+                "temperature term of the corrected rate with caution or "
+                "supply a known coefficient via --correction-method "
+                "literature --beta-t.".format(
+                    100.0 * abs(beta_t_err / beta_t)
                 )
             )
     elif method == "literature":
