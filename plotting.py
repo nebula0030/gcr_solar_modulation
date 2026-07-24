@@ -59,12 +59,29 @@ _SECONDARY_INK = "#52514e"
 
 @dataclass
 class PlotMetadata:
-    """Labels and provenance shown on the figures."""
+    """Labels and provenance shown on the figures.
+
+    ``header_lines`` carries the run parameters (bin size, input file,
+    location, meteorology source, time range, requested sources) that are
+    printed as a block at the top of both figures, above the graphs.
+    """
 
     run_name: str
     station_label: str
     correction_label: str
     footer_notes: List[str] = field(default_factory=list)
+    header_lines: List[str] = field(default_factory=list)
+
+
+def _titlecase(text: str) -> str:
+    """Title-case a label while preserving all-caps tokens (GOES, NMDB, SSN)."""
+    out = []
+    for word in text.split(" "):
+        if any(c.isupper() for c in word) and word.upper() == word:
+            out.append(word)  # already an acronym / all-caps token
+        else:
+            out.append(word[:1].upper() + word[1:])
+    return " ".join(out)
 
 
 def _hover_text(series: AlignedSeries) -> List[str]:
@@ -86,29 +103,53 @@ def _hover_text(series: AlignedSeries) -> List[str]:
     return out
 
 
-def _footer(meta: PlotMetadata) -> str:
-    parts = [
-        "Run: {0}".format(meta.run_name),
-        "Station: {0}".format(meta.station_label),
-        "Correction: {0}".format(meta.correction_label),
-    ]
-    parts.extend(meta.footer_notes)
-    return "<br>".join(parts)
+def _header_text(meta: PlotMetadata, title: str) -> Tuple[str, int]:
+    """Build the top-of-figure header block and count its lines.
+
+    Everything the viewer needs to read the plot -- the title, the run's bin
+    size and input parameters, the chosen station, the correction, and
+    provenance notes -- is placed above the graphs in the top margin, so no
+    text ever overlaps the plotting area.
+    """
+    lines = ['<span style="font-size:17px"><b>{0}</b></span>'.format(title)]
+    lines.append("Run: {0}".format(meta.run_name))
+    lines.extend(meta.header_lines)
+    lines.append("Station: {0}".format(meta.station_label))
+    lines.append("Correction: {0}".format(meta.correction_label))
+    for note in meta.footer_notes:
+        lines.append(
+            '<span style="color:{0}">{1}</span>'.format(_MUTED_INK, note)
+        )
+    return "<br>".join(lines), len(lines)
 
 
-def _apply_common_layout(fig: go.Figure, meta: PlotMetadata, title: str) -> None:
+def _apply_common_layout(
+    fig: go.Figure, meta: PlotMetadata, title: str, plot_height: int,
+    header_yshift: int = 8, bottom_margin: int = 90,
+) -> None:
+    """Attach the top header block and size the figure to hold it.
+
+    The header lives entirely in the top margin, so the figure's total height
+    is the header margin plus ``plot_height`` (the room the graphs themselves
+    need) plus the bottom margin. This keeps the plotting area a fixed, legible
+    size no matter how many header lines the run produces. ``header_yshift``
+    lifts the block above any subplot titles at the top of the plotting area
+    (needed for the stacked side-by-side figure).
+    """
+    text, n_lines = _header_text(meta, title)
+    top_margin = 40 + 20 * n_lines + header_yshift
     fig.update_layout(
-        title=title,
         hovermode="x unified",
         template="plotly_white",
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
-        margin=dict(l=70, r=70, t=90, b=160),
+        height=top_margin + plot_height + bottom_margin,
+        margin=dict(l=70, r=70, t=top_margin, b=bottom_margin),
     )
     fig.add_annotation(
-        text=_footer(meta),
-        xref="paper", yref="paper", x=0, y=-0.28,
+        text=text,
+        xref="paper", yref="paper", x=0, y=1.0,
+        xanchor="left", yanchor="bottom", yshift=header_yshift,
         showarrow=False, align="left",
-        font=dict(size=10, color=_SECONDARY_INK),
+        font=dict(size=12, color=_SECONDARY_INK),
     )
 
 
@@ -171,7 +212,7 @@ def build_overlay(
 
     fig.update_layout(
         xaxis=dict(
-            title="Time (UTC)", rangeslider=dict(visible=True),
+            title="Time (UTC)",
             gridcolor=_GRIDLINE_COLOR, linecolor=_MUTED_INK,
         ),
         yaxis=dict(
@@ -180,9 +221,11 @@ def build_overlay(
         ),
         yaxis2=dict(title="Other indices (native units)", overlaying="y",
                     side="right", showgrid=False, linecolor=_MUTED_INK),
+        legend=dict(orientation="h", yanchor="top", y=-0.14, x=0),
     )
     _apply_common_layout(
-        fig, meta, "Muon rate vs. solar activity - overlay"
+        fig, meta, "Muon Rate vs. Solar Activity — Overlay",
+        plot_height=460, bottom_margin=120,
     )
     return fig
 
@@ -195,8 +238,8 @@ def build_side_by_side(
 ) -> go.Figure:
     """Stacked panels in native units with linked x-axes."""
     n_rows = 1 + len(aligned)
-    titles = ["Muon rate (corrected) [Hz]"] + [
-        "{0} [{1}]".format(s.name, s.units) for s in aligned
+    titles = ["Muon Rate (Corrected) [Hz]"] + [
+        _titlecase("{0} [{1}]".format(s.name, s.units)) for s in aligned
     ]
     fig = make_subplots(
         rows=n_rows, cols=1, shared_xaxes=True,
@@ -240,9 +283,12 @@ def build_side_by_side(
     fig.update_xaxes(title_text="Time (UTC)", row=n_rows, col=1)
     fig.update_xaxes(matches="x", gridcolor=_GRIDLINE_COLOR, linecolor=_MUTED_INK)
     fig.update_yaxes(gridcolor=_GRIDLINE_COLOR, linecolor=_MUTED_INK)
-    fig.update_layout(height=max(260 * n_rows, 500), showlegend=False)
+    fig.update_layout(showlegend=False)
+    # Lift the header clear of the first panel's subplot title, and give each
+    # stacked panel a fixed slice of height.
     _apply_common_layout(
-        fig, meta, "Muon rate vs. solar activity - aligned panels"
+        fig, meta, "Muon Rate vs. Solar Activity — Aligned Panels",
+        plot_height=max(240 * n_rows, 480), header_yshift=30,
     )
     # make_subplots with shared_xaxes should set `matches`; the explicit
     # update_xaxes(matches="x") above guarantees it regardless of Plotly

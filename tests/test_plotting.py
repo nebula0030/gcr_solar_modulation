@@ -116,3 +116,55 @@ def test_figures_build_with_no_external_series():
     rs, corr, _, meta = make_inputs()
     assert build_overlay(rs, corr, [], meta) is not None
     assert build_side_by_side(rs, corr, [], meta) is not None
+
+
+def _annotation_text(fig):
+    return " ".join(a.text or "" for a in fig.layout.annotations)
+
+
+def test_header_block_shows_bin_size_and_inputs_on_both_figures():
+    rs, corr, aligned, meta = make_inputs()
+    meta.header_lines = [
+        "Bin size: 3600 s  (6 bins, 2.40% mean Poisson error)",
+        "Detector location: lat 37.3688, lon -122.0363",
+    ]
+    for fig in (build_overlay(rs, corr, aligned, meta),
+                build_side_by_side(rs, corr, aligned, meta)):
+        text = _annotation_text(fig)
+        assert "Bin size: 3600 s" in text
+        assert "Detector location: lat 37.3688" in text
+        # Station and correction travel with the header too.
+        assert "UFSZ" in text
+        assert "beta_P" in text
+
+
+def test_titles_are_title_cased():
+    rs, corr, aligned, meta = make_inputs()
+    overlay = build_overlay(rs, corr, aligned, meta)
+    side = build_side_by_side(rs, corr, aligned, meta)
+    assert "Muon Rate vs. Solar Activity" in _annotation_text(overlay)
+    assert "Muon Rate vs. Solar Activity" in _annotation_text(side)
+
+
+def test_overlay_has_no_rangeslider():
+    """The bottom range-slider was removed; nothing sits below the plot to
+    overlap with footer text."""
+    rs, corr, aligned, meta = make_inputs()
+    fig = build_overlay(rs, corr, aligned, meta)
+    xaxis = fig.layout.to_plotly_json().get("xaxis", {})
+    rs_cfg = xaxis.get("rangeslider")
+    assert not (rs_cfg and rs_cfg.get("visible"))
+
+
+def test_no_annotation_is_anchored_below_the_plot():
+    """All descriptive text now lives in the top margin (y >= 1), so none of
+    it can cover the graphs."""
+    rs, corr, aligned, meta = make_inputs()
+    for fig in (build_overlay(rs, corr, aligned, meta),
+                build_side_by_side(rs, corr, aligned, meta)):
+        for ann in fig.layout.annotations:
+            if ann.yref == "paper" and ann.y is not None and ann.text \
+                    and "Bin size" not in (ann.text or "") and ann.y < 0:
+                raise AssertionError(
+                    "descriptive annotation below plot: {0!r}".format(ann.text)
+                )

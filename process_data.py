@@ -548,12 +548,29 @@ def main(argv: Optional[List[str]] = None) -> int:
     footer_notes.extend("Note: " + n for n in notes)
     footer_notes.extend("Unavailable - " + w for w in warnings)
 
+    run_end_utc = rs.bin_start_utc[-1] + np.timedelta64(
+        int(rs.bin_length_s * 1e9), "ns"
+    )
+    requested_sources = ", ".join(
+        s.strip() for s in args.sources.split(",") if s.strip()
+    ) or "none"
+    header_lines = [
+        "Bin size: {0:g} s  ({1} bins, {2:.2f}% mean Poisson error)".format(
+            rs.bin_length_s, len(rs.counts), rs.mean_fractional_error * 100.0),
+        "Detector location: lat {0:.4f}, lon {1:.4f}".format(args.lat, args.lon),
+        "Meteorology source: {0}".format(args.met_source),
+        "Time range (UTC): {0} to {1}".format(
+            rs.bin_start_utc[0], run_end_utc),
+        "External sources requested: {0}".format(requested_sources),
+    ]
+
     meta = PlotMetadata(
         run_name=run_name,
         station_label="{0} ({1}), Rc={2:.2f} GV, alt={3} m".format(
             station.code, station.name, station.rigidity_gv, station.altitude_m),
         correction_label=correction_label,
         footer_notes=footer_notes,
+        header_lines=header_lines,
     )
 
     overlay_path = os.path.join(output_dir, run_name + "_overlay.html")
