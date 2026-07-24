@@ -453,6 +453,10 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
     var gap = 0.06, k = shownRows.length;
     var h = (1 - gap * (k - 1)) / k;
     var lay = {{}};
+    /* Shrink the figure to match the visible panel count, so the remaining
+       panels keep a sensible height instead of ballooning to fill a fixed
+       tall figure and pushing the bottom panel off-screen. */
+    lay["height"] = CFG.topMargin + CFG.perPanelPx * k + CFG.bottomMargin;
     shownRows.forEach(function (row, i) {{
       var top = 1 - i * (h + gap);
       var isBottom = (i === k - 1);
@@ -527,6 +531,9 @@ def write_html(fig: go.Figure, path: str, stacked: bool = False) -> None:
         "traceColors": {"light": light, "dark": dark},
         "stacked": stacked,
         "nRows": n_rows,
+        "topMargin": int(fig.layout.margin.t or 90),
+        "bottomMargin": int(fig.layout.margin.b or 90),
+        "perPanelPx": 240,
         "rowOfTrace": list(range(1, len(fig.data) + 1)) if stacked else [1] * len(fig.data),
         "muonTrace": 0,
         "hasSecondaryAxis": not stacked,
