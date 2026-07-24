@@ -21,6 +21,8 @@ series keeps the same colour across both figures.
 """
 from __future__ import annotations
 
+import html
+import json
 from dataclasses import dataclass, field
 from typing import List, Tuple
 
@@ -55,6 +57,43 @@ _MUON_COLOR = "#2a78d6"
 _GRIDLINE_COLOR = "#e1e0d9"
 _MUTED_INK = "#898781"
 _SECONDARY_INK = "#52514e"
+
+#: Light -> dark step for every palette slot. Dark mode is *selected* from the
+#: same hues re-stepped for the dark surface, not an automatic flip.
+_LIGHT_TO_DARK = {
+    "#2a78d6": "#3987e5",  # slot 1 blue (muon rate)
+    "#eb6834": "#d95926",  # slot 2 orange
+    "#1baf7a": "#199e70",  # slot 3 aqua
+    "#eda100": "#c98500",  # slot 4 yellow
+    "#e87ba4": "#d55181",  # slot 5 magenta
+    "#008300": "#008300",  # slot 6 green
+    "#4a3aa7": "#9085e9",  # slot 7 violet
+    "#e34948": "#e66767",  # slot 8 red
+}
+
+#: Surface / ink / chrome tokens per mode, from the dataviz palette.
+_THEMES = {
+    "light": {
+        "surface": "#fcfcfb", "text": "#0b0b0b", "secondary": "#52514e",
+        "muted": "#898781", "grid": "#e1e0d9", "axis": "#c3c2b7",
+        "panel": "#f2f1ec", "border": "#d8d7d0",
+    },
+    "dark": {
+        "surface": "#1a1a19", "text": "#ffffff", "secondary": "#c3c2b7",
+        "muted": "#898781", "grid": "#2c2c2a", "axis": "#383835",
+        "panel": "#232322", "border": "#383835",
+    },
+}
+
+#: matplotlib-style line specs for the muon rate. Dense runs get unreadable
+#: when the connecting line dominates, so markers-only options are offered.
+_LINE_SPECS = (
+    ("o-", "o-  line + markers", "lines+markers", "solid", 8),
+    ("-", "-   line only", "lines", "solid", 8),
+    ("o", "o   markers only", "markers", "solid", 8),
+    ("--", "--  dashed line", "lines", "dash", 8),
+    (".", ".   fine points", "markers", "solid", 4),
+)
 
 
 @dataclass
@@ -296,11 +335,235 @@ def build_side_by_side(
     return fig
 
 
-def write_html(fig: go.Figure, path: str) -> None:
-    """Write a self-contained interactive HTML file."""
-    fig.write_html(
-        path,
-        include_plotlyjs=True,
-        full_html=True,
+_PAGE_TEMPLATE = """<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{title}</title>
+<style>
+  :root {{ color-scheme: light; }}
+  html[data-theme="dark"] {{ color-scheme: dark; }}
+  body {{
+    margin: 0; padding: 16px;
+    font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, sans-serif;
+    background: var(--surface); color: var(--text);
+  }}
+  html[data-theme="light"] body {{ --surface:#fcfcfb; --text:#0b0b0b;
+    --secondary:#52514e; --panel:#f2f1ec; --border:#d8d7d0; }}
+  html[data-theme="dark"] body {{ --surface:#1a1a19; --text:#ffffff;
+    --secondary:#c3c2b7; --panel:#232322; --border:#383835; }}
+  .controls {{
+    display: flex; flex-wrap: wrap; gap: 18px; align-items: flex-start;
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 8px; padding: 12px 14px; margin-bottom: 14px;
+  }}
+  .controls fieldset {{ border: 0; margin: 0; padding: 0; }}
+  .controls legend, .ctl-label {{
+    font-size: 12px; font-weight: 600; color: var(--secondary);
+    text-transform: uppercase; letter-spacing: .04em;
+    padding: 0; margin-bottom: 6px; display: block;
+  }}
+  .series-list {{ display: flex; flex-wrap: wrap; gap: 4px 16px; }}
+  .series-list label {{ display: flex; align-items: center; gap: 6px;
+    white-space: nowrap; cursor: pointer; }}
+  .swatch {{ width: 11px; height: 11px; border-radius: 2px; flex: none; }}
+  select, button {{
+    font: inherit; padding: 5px 9px; border-radius: 6px;
+    border: 1px solid var(--border); background: var(--surface);
+    color: var(--text); cursor: pointer;
+  }}
+  #viz-plot {{ background: var(--surface); }}
+</style>
+</head>
+<body>
+<div class="controls">
+  <div>
+    <span class="ctl-label">Appearance</span>
+    <button id="theme-toggle" type="button">Switch to dark mode</button>
+  </div>
+  <div>
+    <span class="ctl-label">Muon rate line spec</span>
+    <select id="line-spec">{line_spec_options}</select>
+  </div>
+  <fieldset>
+    <legend>{series_legend}</legend>
+    <div class="series-list" id="series-list">{series_checkboxes}</div>
+  </fieldset>
+</div>
+{plot_div}
+<script>
+(function () {{
+  var CFG = {config_json};
+  var gd = document.getElementById("viz-plot");
+  var root = document.documentElement;
+
+  function axisKey(prefix, row) {{ return row === 1 ? prefix : prefix + row; }}
+
+  /* ---- theme -------------------------------------------------------- */
+  function applyTheme(mode) {{
+    var t = CFG.themes[mode];
+    root.setAttribute("data-theme", mode);
+    document.getElementById("theme-toggle").textContent =
+      mode === "dark" ? "Switch to light mode" : "Switch to dark mode";
+
+    var lay = {{
+      "paper_bgcolor": t.surface, "plot_bgcolor": t.surface,
+      "font.color": t.text
+    }};
+    for (var r = 1; r <= CFG.nRows; r++) {{
+      lay[axisKey("xaxis", r) + ".gridcolor"] = t.grid;
+      lay[axisKey("xaxis", r) + ".linecolor"] = t.axis;
+      lay[axisKey("yaxis", r) + ".gridcolor"] = t.grid;
+      lay[axisKey("yaxis", r) + ".linecolor"] = t.axis;
+    }}
+    if (CFG.hasSecondaryAxis) {{ lay["yaxis2.linecolor"] = t.axis; }}
+    CFG.annotationRoles.forEach(function (role, i) {{
+      lay["annotations[" + i + "].font.color"] =
+        role === "header" ? t.secondary : t.text;
+    }});
+    Plotly.relayout(gd, lay);
+    Plotly.restyle(gd, {{
+      "line.color": CFG.traceColors[mode],
+      "marker.color": CFG.traceColors[mode]
+    }});
+    document.querySelectorAll(".swatch").forEach(function (sw, i) {{
+      sw.style.background = CFG.traceColors[mode][i];
+    }});
+  }}
+
+  document.getElementById("theme-toggle").addEventListener("click", function () {{
+    applyTheme(root.getAttribute("data-theme") === "dark" ? "light" : "dark");
+  }});
+
+  /* ---- series checkboxes -------------------------------------------- */
+  function applyVisibility() {{
+    var boxes = Array.prototype.slice.call(
+      document.querySelectorAll("#series-list input[type=checkbox]"));
+    var vis = boxes.map(function (b) {{ return b.checked ? true : "legendonly"; }});
+    Plotly.restyle(gd, {{ visible: vis }});
+
+    if (!CFG.stacked) {{ return; }}
+    /* Collapse hidden panels so the remaining ones expand to fill. */
+    var shownRows = [], hiddenRows = [];
+    boxes.forEach(function (b, i) {{
+      (b.checked ? shownRows : hiddenRows).push(CFG.rowOfTrace[i]);
+    }});
+    if (!shownRows.length) {{ return; }}
+    var gap = 0.06, k = shownRows.length;
+    var h = (1 - gap * (k - 1)) / k;
+    var lay = {{}};
+    shownRows.forEach(function (row, i) {{
+      var top = 1 - i * (h + gap);
+      var isBottom = (i === k - 1);
+      lay[axisKey("yaxis", row) + ".domain"] = [Math.max(top - h, 0), top];
+      lay[axisKey("yaxis", row) + ".visible"] = true;
+      lay[axisKey("xaxis", row) + ".visible"] = true;
+      /* Tick labels live on the bottom panel only, so whichever panel ends
+         up last must take over the time axis when others are deselected. */
+      lay[axisKey("xaxis", row) + ".showticklabels"] = isBottom;
+      lay[axisKey("xaxis", row) + ".title.text"] = isBottom ? "Time (UTC)" : "";
+      lay["annotations[" + (row - 1) + "].y"] = Math.min(top + 0.012, 1);
+      lay["annotations[" + (row - 1) + "].visible"] = true;
+    }});
+    hiddenRows.forEach(function (row) {{
+      lay[axisKey("yaxis", row) + ".visible"] = false;
+      lay[axisKey("xaxis", row) + ".visible"] = false;
+      lay["annotations[" + (row - 1) + "].visible"] = false;
+    }});
+    Plotly.relayout(gd, lay);
+  }}
+
+  document.getElementById("series-list")
+    .addEventListener("change", applyVisibility);
+
+  /* ---- muon-rate line spec ------------------------------------------ */
+  document.getElementById("line-spec").addEventListener("change", function (e) {{
+    var s = CFG.lineSpecs[e.target.value];
+    Plotly.restyle(gd,
+      {{ mode: s.mode, "line.dash": s.dash, "marker.size": s.size }},
+      [CFG.muonTrace]);
+  }});
+}})();
+</script>
+</body>
+</html>
+"""
+
+
+def _trace_colors(fig: go.Figure) -> Tuple[List[str], List[str]]:
+    """Light and dark colour for every trace, in trace order."""
+    light, dark = [], []
+    for trace in fig.data:
+        color = None
+        if getattr(trace, "line", None) is not None:
+            color = trace.line.color
+        if color is None:
+            color = _MUON_COLOR
+        light.append(color)
+        dark.append(_LIGHT_TO_DARK.get(color, color))
+    return light, dark
+
+
+def write_html(fig: go.Figure, path: str, stacked: bool = False) -> None:
+    """Write a self-contained interactive HTML page.
+
+    The page wraps the Plotly figure in a control bar offering a light/dark
+    theme toggle, a per-series checkbox list, and a matplotlib-style line-spec
+    selector for the muon rate (dense runs are easier to read as markers only,
+    where the connecting line would otherwise bury the trend).
+
+    ``stacked`` marks the side-by-side figure, whose checkboxes additionally
+    collapse a deselected panel so the remaining panels expand to fill.
+    """
+    names = [t.name or "Series {0}".format(i + 1) for i, t in enumerate(fig.data)]
+    light, dark = _trace_colors(fig)
+
+    n_rows = len(fig.data) if stacked else 1
+    annotation_roles = ["subplot"] * (len(fig.layout.annotations) - 1) + ["header"]
+
+    config = {
+        "themes": _THEMES,
+        "traceColors": {"light": light, "dark": dark},
+        "stacked": stacked,
+        "nRows": n_rows,
+        "rowOfTrace": list(range(1, len(fig.data) + 1)) if stacked else [1] * len(fig.data),
+        "muonTrace": 0,
+        "hasSecondaryAxis": not stacked,
+        "annotationRoles": annotation_roles,
+        "lineSpecs": {
+            key: {"mode": mode, "dash": dash, "size": size}
+            for key, _label, mode, dash, size in _LINE_SPECS
+        },
+    }
+
+    checkboxes = "".join(
+        '<label><input type="checkbox" checked data-i="{i}">'
+        '<span class="swatch" style="background:{color}"></span>{name}</label>'.format(
+            i=i, color=light[i], name=html.escape(names[i])
+        )
+        for i in range(len(names))
+    )
+    options = "".join(
+        '<option value="{key}"{sel}>{label}</option>'.format(
+            key=html.escape(key), label=html.escape(label),
+            sel=" selected" if key == "o-" else "",
+        )
+        for key, label, _mode, _dash, _size in _LINE_SPECS
+    )
+
+    plot_div = fig.to_html(
+        full_html=False, include_plotlyjs=True, div_id="viz-plot",
         config={"scrollZoom": True, "displaylogo": False},
     )
+
+    page = _PAGE_TEMPLATE.format(
+        title=html.escape("Muon Rate vs. Solar Activity"),
+        line_spec_options=options,
+        series_legend="Panels" if stacked else "Lines",
+        series_checkboxes=checkboxes,
+        plot_div=plot_div,
+        config_json=json.dumps(config),
+    )
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(page)

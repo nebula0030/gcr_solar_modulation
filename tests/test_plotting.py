@@ -107,9 +107,58 @@ def test_write_html_produces_a_self_contained_file(tmp_path):
     out = tmp_path / "overlay.html"
     write_html(fig, str(out))
     content = out.read_text()
-    assert content.lstrip().lower().startswith("<html")
+    assert content.lstrip().lower().startswith("<!doctype html")
     assert "plotly" in content.lower()
     assert len(content) > 100_000  # the JS bundle is inlined
+
+
+def test_page_has_a_checkbox_per_series(tmp_path):
+    rs, corr, aligned, meta = make_inputs()
+    for kind, fig, stacked in (
+        ("overlay", build_overlay(rs, corr, aligned, meta), False),
+        ("side", build_side_by_side(rs, corr, aligned, meta), True),
+    ):
+        out = tmp_path / (kind + ".html")
+        write_html(fig, str(out), stacked=stacked)
+        content = out.read_text()
+        n_boxes = content.count('type="checkbox"')
+        assert n_boxes == len(fig.data), (kind, n_boxes, len(fig.data))
+        assert "Neutron monitor" in content and "Kp index" in content
+
+
+def test_page_has_a_theme_toggle(tmp_path):
+    rs, corr, aligned, meta = make_inputs()
+    out = tmp_path / "overlay.html"
+    write_html(build_overlay(rs, corr, aligned, meta), str(out))
+    content = out.read_text()
+    assert 'id="theme-toggle"' in content
+    assert "Switch to dark mode" in content
+    # dark-mode palette steps must be present, not an automatic flip
+    assert "#3987e5" in content and "#1a1a19" in content
+
+
+def test_page_has_matplotlib_style_line_spec_for_the_muon_rate(tmp_path):
+    rs, corr, aligned, meta = make_inputs()
+    out = tmp_path / "overlay.html"
+    write_html(build_overlay(rs, corr, aligned, meta), str(out))
+    content = out.read_text()
+    assert 'id="line-spec"' in content
+    for spec in ("o-", "-", "o", "--", "."):
+        assert 'value="{0}"'.format(spec) in content
+    # markers-only must really drop the connecting line
+    assert '"o": {"mode": "markers"' in content.replace("'", '"')
+
+
+def test_stacked_page_collapses_deselected_panels(tmp_path):
+    """Side-by-side checkboxes must recompute panel domains, not just hide a
+    trace and leave an empty panel behind."""
+    rs, corr, aligned, meta = make_inputs()
+    out = tmp_path / "side.html"
+    write_html(build_side_by_side(rs, corr, aligned, meta), str(out), stacked=True)
+    content = out.read_text()
+    assert '"stacked": true' in content
+    assert ".domain" in content
+    assert '"rowOfTrace": [1, 2, 3]' in content
 
 
 def test_figures_build_with_no_external_series():

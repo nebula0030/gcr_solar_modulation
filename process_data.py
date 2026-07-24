@@ -576,7 +576,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     overlay_path = os.path.join(output_dir, run_name + "_overlay.html")
     side_path = os.path.join(output_dir, run_name + "_sidebyside.html")
     write_html(build_overlay(rs, correction, aligned, meta), overlay_path)
-    write_html(build_side_by_side(rs, correction, aligned, meta), side_path)
+    write_html(
+        build_side_by_side(rs, correction, aligned, meta), side_path,
+        stacked=True,
+    )
     print("Wrote {0}".format(overlay_path))
     print("Wrote {0}".format(side_path))
 
