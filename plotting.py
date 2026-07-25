@@ -417,12 +417,19 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
 
   /* Height that keeps every visible panel on screen: fill whatever the
      viewport leaves after the controls and header, but never shrink a panel
-     below a readable floor (then the page scrolls instead of cropping). */
+     below a readable floor (then the page scrolls instead of cropping).
+     The overlay is a single chart, so it simply fills the viewport -- which
+     is what makes collapsing the header visibly enlarge it. */
   function fitHeight() {{
     var k = visiblePanelCount();
     var avail = window.innerHeight - chromeHeight();
-    var floor = CFG.topMargin + CFG.minPanelPx * k + CFG.bottomMargin;
-    var ideal = CFG.topMargin + CFG.perPanelPx * k + CFG.bottomMargin;
+    /* Floor keeps panels readable (stacked) or keeps the overlay tall enough
+       that its bottom legend clears the x-axis title (non-stacked). */
+    var floorPlot = CFG.stacked ? CFG.minPanelPx * k : CFG.minOverlayPlot;
+    var floor = CFG.topMargin + floorPlot + CFG.bottomMargin;
+    var ideal = CFG.stacked
+      ? CFG.topMargin + CFG.perPanelPx * k + CFG.bottomMargin
+      : avail;
     var target = Math.max(Math.min(ideal, avail), floor);
     Plotly.relayout(gd, {{ height: target }});
   }}
@@ -571,6 +578,7 @@ def write_html(fig: go.Figure, path: str, stacked: bool = False) -> None:
         "bottomMargin": int(fig.layout.margin.b or 90),
         "perPanelPx": 240,
         "minPanelPx": 150,
+        "minOverlayPlot": 340,
         "rowOfTrace": list(range(1, len(fig.data) + 1)) if stacked else [1] * len(fig.data),
         "muonTrace": 0,
         "hasSecondaryAxis": not stacked,
