@@ -167,32 +167,49 @@ def test_figures_build_with_no_external_series():
     assert build_side_by_side(rs, corr, [], meta) is not None
 
 
-def _annotation_text(fig):
-    return " ".join(a.text or "" for a in fig.layout.annotations)
-
-
-def test_header_block_shows_bin_size_and_inputs_on_both_figures():
+def test_header_block_shows_bin_size_and_inputs_on_both_figures(tmp_path):
     rs, corr, aligned, meta = make_inputs()
     meta.header_lines = [
         "Bin size: 3600 s  (6 bins, 2.40% mean Poisson error)",
         "Detector location: lat 37.3688, lon -122.0363",
     ]
-    for fig in (build_overlay(rs, corr, aligned, meta),
-                build_side_by_side(rs, corr, aligned, meta)):
-        text = _annotation_text(fig)
-        assert "Bin size: 3600 s" in text
-        assert "Detector location: lat 37.3688" in text
+    for kind, fig, stacked in (
+        ("overlay", build_overlay(rs, corr, aligned, meta), False),
+        ("side", build_side_by_side(rs, corr, aligned, meta), True),
+    ):
+        out = tmp_path / (kind + ".html")
+        write_html(fig, str(out), stacked=stacked)
+        content = out.read_text()
+        assert "Bin size: 3600 s" in content
+        assert "Detector location: lat 37.3688" in content
         # Station and correction travel with the header too.
-        assert "UFSZ" in text
-        assert "beta_P" in text
+        assert "UFSZ" in content
+        assert "beta_P" in content
+        # The header is an HTML block, not baked into the figure margin.
+        assert 'class="run-header"' in content
 
 
-def test_titles_are_title_cased():
+def test_titles_are_title_cased(tmp_path):
     rs, corr, aligned, meta = make_inputs()
-    overlay = build_overlay(rs, corr, aligned, meta)
+    for kind, fig, stacked in (
+        ("overlay", build_overlay(rs, corr, aligned, meta), False),
+        ("side", build_side_by_side(rs, corr, aligned, meta), True),
+    ):
+        out = tmp_path / (kind + ".html")
+        write_html(fig, str(out), stacked=stacked)
+        assert "Muon Rate vs. Solar Activity" in out.read_text()
+
+
+def test_header_is_not_baked_into_the_figure_margin():
+    """The metadata header must be HTML, not a tall figure top-margin that
+    steals vertical space from the graphs."""
+    rs, corr, aligned, meta = make_inputs()
     side = build_side_by_side(rs, corr, aligned, meta)
-    assert "Muon Rate vs. Solar Activity" in _annotation_text(overlay)
-    assert "Muon Rate vs. Solar Activity" in _annotation_text(side)
+    # top margin only needs to clear the first subplot title now.
+    assert side.layout.margin.t <= 80
+    # bin-size text is stashed for the HTML page, not added as an annotation.
+    ann = " ".join(a.text or "" for a in side.layout.annotations)
+    assert "Bin size" not in ann
 
 
 def test_overlay_has_no_rangeslider():

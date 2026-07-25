@@ -143,15 +143,14 @@ def _hover_text(series: AlignedSeries) -> List[str]:
 
 
 def _header_text(meta: PlotMetadata, title: str) -> Tuple[str, int]:
-    """Build the top-of-figure header block and count its lines.
+    """Build the run's metadata block as HTML lines (title excluded).
 
-    Everything the viewer needs to read the plot -- the title, the run's bin
-    size and input parameters, the chosen station, the correction, and
-    provenance notes -- is placed above the graphs in the top margin, so no
-    text ever overlaps the plotting area.
+    Everything the viewer needs to read the plot -- the run's bin size and
+    input parameters, the chosen station, the correction, and provenance
+    notes -- rendered as an HTML block that ``write_html`` places above the
+    graphs. Returns ``(meta_html, line_count)``.
     """
-    lines = ['<span style="font-size:17px"><b>{0}</b></span>'.format(title)]
-    lines.append("Run: {0}".format(meta.run_name))
+    lines = ["Run: {0}".format(meta.run_name)]
     lines.extend(meta.header_lines)
     lines.append("Station: {0}".format(meta.station_label))
     lines.append("Correction: {0}".format(meta.correction_label))
@@ -164,31 +163,23 @@ def _header_text(meta: PlotMetadata, title: str) -> Tuple[str, int]:
 
 def _apply_common_layout(
     fig: go.Figure, meta: PlotMetadata, title: str, plot_height: int,
-    header_yshift: int = 8, bottom_margin: int = 90,
+    top_margin: int = 60, bottom_margin: int = 90,
 ) -> None:
-    """Attach the top header block and size the figure to hold it.
+    """Size the figure and stash the header text for the HTML page.
 
-    The header lives entirely in the top margin, so the figure's total height
-    is the header margin plus ``plot_height`` (the room the graphs themselves
-    need) plus the bottom margin. This keeps the plotting area a fixed, legible
-    size no matter how many header lines the run produces. ``header_yshift``
-    lifts the block above any subplot titles at the top of the plotting area
-    (needed for the stacked side-by-side figure).
+    The metadata header is NOT baked into the figure -- ``write_html`` renders
+    it as an HTML block above the plot, so the whole plotting area goes to the
+    graphs instead of a tall top margin. The header text (and its line count)
+    is stashed in ``layout.meta`` for ``write_html`` to read. ``top_margin``
+    only needs to clear the first subplot title.
     """
-    text, n_lines = _header_text(meta, title)
-    top_margin = 40 + 20 * n_lines + header_yshift
+    meta_html, _ = _header_text(meta, title)
     fig.update_layout(
         hovermode="x unified",
         template="plotly_white",
         height=top_margin + plot_height + bottom_margin,
         margin=dict(l=70, r=70, t=top_margin, b=bottom_margin),
-    )
-    fig.add_annotation(
-        text=text,
-        xref="paper", yref="paper", x=0, y=1.0,
-        xanchor="left", yanchor="bottom", yshift=header_yshift,
-        showarrow=False, align="left",
-        font=dict(size=12, color=_SECONDARY_INK),
+        meta=dict(header_title=title, header_meta=meta_html),
     )
 
 
@@ -323,11 +314,9 @@ def build_side_by_side(
     fig.update_xaxes(matches="x", gridcolor=_GRIDLINE_COLOR, linecolor=_MUTED_INK)
     fig.update_yaxes(gridcolor=_GRIDLINE_COLOR, linecolor=_MUTED_INK)
     fig.update_layout(showlegend=False)
-    # Lift the header clear of the first panel's subplot title, and give each
-    # stacked panel a fixed slice of height.
     _apply_common_layout(
         fig, meta, "Muon Rate vs. Solar Activity — Aligned Panels",
-        plot_height=max(240 * n_rows, 480), header_yshift=30,
+        plot_height=max(240 * n_rows, 480),
     )
     # make_subplots with shared_xaxes should set `matches`; the explicit
     # update_xaxes(matches="x") above guarantees it regardless of Plotly
@@ -374,6 +363,10 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
     color: var(--text); cursor: pointer;
   }}
   #viz-plot {{ background: var(--surface); }}
+  .run-header {{ margin: 8px 4px 10px; color: var(--secondary); }}
+  .run-header > summary {{ cursor: pointer; font-size: 17px; font-weight: 700;
+    color: var(--text); margin-bottom: 6px; list-style-position: outside; }}
+  .run-header .meta {{ font-size: 12px; line-height: 1.5; }}
 </style>
 </head>
 <body>
@@ -391,6 +384,10 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
     <div class="series-list" id="series-list">{series_checkboxes}</div>
   </fieldset>
 </div>
+<details class="run-header" open>
+  <summary>{header_title}</summary>
+  <div class="meta">{header_meta}</div>
+</details>
 {plot_div}
 <script>
 (function () {{
@@ -399,6 +396,40 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
   var root = document.documentElement;
 
   function axisKey(prefix, row) {{ return row === 1 ? prefix : prefix + row; }}
+
+  /* ---- fit the figure to the viewport ------------------------------- */
+  function chromeHeight() {{
+    var h = 24;  /* body padding top+bottom */
+    ["controls", "run-header"].forEach(function (cls) {{
+      var el = document.querySelector("." + cls);
+      if (el) {{ h += el.getBoundingClientRect().height; }}
+    }});
+    return h;
+  }}
+
+  function visiblePanelCount() {{
+    if (!CFG.stacked) {{ return 1; }}
+    var boxes = document.querySelectorAll("#series-list input[type=checkbox]");
+    var n = 0;
+    boxes.forEach(function (b) {{ if (b.checked) {{ n++; }} }});
+    return Math.max(n, 1);
+  }}
+
+  /* Height that keeps every visible panel on screen: fill whatever the
+     viewport leaves after the controls and header, but never shrink a panel
+     below a readable floor (then the page scrolls instead of cropping). */
+  function fitHeight() {{
+    var k = visiblePanelCount();
+    var avail = window.innerHeight - chromeHeight();
+    var floor = CFG.topMargin + CFG.minPanelPx * k + CFG.bottomMargin;
+    var ideal = CFG.topMargin + CFG.perPanelPx * k + CFG.bottomMargin;
+    var target = Math.max(Math.min(ideal, avail), floor);
+    Plotly.relayout(gd, {{ height: target }});
+  }}
+
+  window.addEventListener("resize", fitHeight);
+  var hdr = document.querySelector(".run-header");
+  if (hdr) {{ hdr.addEventListener("toggle", fitHeight); }}
 
   /* ---- theme -------------------------------------------------------- */
   function applyTheme(mode) {{
@@ -443,7 +474,7 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
     var vis = boxes.map(function (b) {{ return b.checked ? true : "legendonly"; }});
     Plotly.restyle(gd, {{ visible: vis }});
 
-    if (!CFG.stacked) {{ return; }}
+    if (!CFG.stacked) {{ fitHeight(); return; }}
     /* Collapse hidden panels so the remaining ones expand to fill. */
     var shownRows = [], hiddenRows = [];
     boxes.forEach(function (b, i) {{
@@ -453,10 +484,6 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
     var gap = 0.06, k = shownRows.length;
     var h = (1 - gap * (k - 1)) / k;
     var lay = {{}};
-    /* Shrink the figure to match the visible panel count, so the remaining
-       panels keep a sensible height instead of ballooning to fill a fixed
-       tall figure and pushing the bottom panel off-screen. */
-    lay["height"] = CFG.topMargin + CFG.perPanelPx * k + CFG.bottomMargin;
     shownRows.forEach(function (row, i) {{
       var top = 1 - i * (h + gap);
       var isBottom = (i === k - 1);
@@ -475,11 +502,14 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
       lay[axisKey("xaxis", row) + ".visible"] = false;
       lay["annotations[" + (row - 1) + "].visible"] = false;
     }});
-    Plotly.relayout(gd, lay);
+    Plotly.relayout(gd, lay).then(fitHeight);
   }}
 
   document.getElementById("series-list")
     .addEventListener("change", applyVisibility);
+
+  /* size to the viewport once Plotly has laid out the initial figure */
+  fitHeight();
 
   /* ---- muon-rate line spec ------------------------------------------ */
   document.getElementById("line-spec").addEventListener("change", function (e) {{
@@ -524,7 +554,13 @@ def write_html(fig: go.Figure, path: str, stacked: bool = False) -> None:
     light, dark = _trace_colors(fig)
 
     n_rows = len(fig.data) if stacked else 1
-    annotation_roles = ["subplot"] * (len(fig.layout.annotations) - 1) + ["header"]
+    # Every remaining annotation is a subplot title (the metadata header is now
+    # HTML, not a figure annotation).
+    annotation_roles = ["subplot"] * len(fig.layout.annotations)
+
+    fig_meta = fig.layout.meta or {}
+    header_title = fig_meta.get("header_title", "Muon Rate vs. Solar Activity")
+    header_meta = fig_meta.get("header_meta", "")
 
     config = {
         "themes": _THEMES,
@@ -534,6 +570,7 @@ def write_html(fig: go.Figure, path: str, stacked: bool = False) -> None:
         "topMargin": int(fig.layout.margin.t or 90),
         "bottomMargin": int(fig.layout.margin.b or 90),
         "perPanelPx": 240,
+        "minPanelPx": 150,
         "rowOfTrace": list(range(1, len(fig.data) + 1)) if stacked else [1] * len(fig.data),
         "muonTrace": 0,
         "hasSecondaryAxis": not stacked,
@@ -565,7 +602,9 @@ def write_html(fig: go.Figure, path: str, stacked: bool = False) -> None:
     )
 
     page = _PAGE_TEMPLATE.format(
-        title=html.escape("Muon Rate vs. Solar Activity"),
+        title=html.escape(header_title),
+        header_title=html.escape(header_title),
+        header_meta=header_meta,
         line_spec_options=options,
         series_legend="Panels" if stacked else "Lines",
         series_checkboxes=checkboxes,
