@@ -20,7 +20,7 @@ import numpy as np
 
 from align import AlignedSeries, align_to_bins
 from correction import CorrectionError, CorrectionResult, correct
-from cosmicwatch_io import DataFormatError, read_events
+from cosmicwatch_io import DataFormatError, Events
 from external_sources import (
     NMDB_ACKNOWLEDGEMENT,
     Cache,
@@ -32,8 +32,9 @@ from external_sources import (
     fetch_sunspot,
 )
 from nmdb_stations import Station, StationError, rank_by_rigidity, select_station
-from plotting import PlotMetadata, build_overlay, build_side_by_side, write_html
+from plotting import DetectorSeries, PlotMetadata, build_overlay, build_side_by_side, write_html
 from rate import RateError, RateSeries, compute_rate
+from splice import SpliceError, group_by_detector, parse_start_overrides, read_events_multi
 
 ALL_SOURCES = ("nmdb", "goes", "kp", "sunspot")
 
@@ -54,10 +55,18 @@ def build_parser() -> argparse.ArgumentParser:
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("input_file", help="CosmicWatch v3X 13-column data file")
+    parser.add_argument(
+        "input_files", nargs="+",
+        help="one or more CosmicWatch v3X 13-column data files",
+    )
     parser.add_argument(
         "--bin-length", type=float, required=True, metavar="SECONDS",
         help="rate bin width in seconds",
+    )
+    parser.add_argument(
+        "--start-time", action="append", default=[], metavar="FILE=DATETIME",
+        help="override a file's start datetime (repeatable); FILE matches "
+             "by basename, DATETIME is ISO-8601 UTC",
     )
 
     location = parser.add_argument_group("detector location")
@@ -464,45 +473,83 @@ def main(argv: Optional[List[str]] = None) -> int:
     args = build_parser().parse_args(argv)
 
     try:
-        events = read_events(args.input_file)
-    except (DataFormatError, OSError) as exc:
-        print("error: {0}".format(exc), file=sys.stderr)
-        return 2
-
-    try:
-        rs = compute_rate(events, args.bin_length)
-    except RateError as exc:
+        overrides = parse_start_overrides(args.start_time)
+        groups = group_by_detector(args.input_files)
+    except (SpliceError, DataFormatError, OSError) as exc:
         print("error: {0}".format(exc), file=sys.stderr)
         return 2
 
     cache = Cache(args.cache_dir, refresh=args.refresh_cache)
 
-    external_press = external_temp = None
-    met_warnings: List[str] = []
-    if args.met_source == "external":
-        try:
-            external_press, external_temp = fetch_external_meteorology(
-                rs, args.lat, args.lon, cache
-            )
-        except FetchError as exc:
-            met_warnings.append(
-                "external meteorology unavailable ({0}); "
-                "falling back to onboard sensors".format(exc)
-            )
-            external_press = external_temp = None
+    detectors: List[DetectorSeries] = []
+    all_coverage_utc: List[Tuple[np.datetime64, np.datetime64]] = []
+    # (name, paths, correction, events, rs) for each detector, in group order.
+    per_detector_report: List[
+        Tuple[str, List[str], CorrectionResult, Events, RateSeries]
+    ] = []
+    met_warnings: List[str] = []  # met-source failures, surfaced in the summary
 
-    try:
-        correction = correct(
-            rs,
-            method=args.correction_method,
-            beta_p_percent=args.beta_p,
-            beta_t_percent=args.beta_t,
-            press_hpa=external_press,
-            temp_c=external_temp,
-        )
-    except CorrectionError as exc:
-        print("error: {0}".format(exc), file=sys.stderr)
-        return 2
+    for name, paths in groups.items():
+        try:
+            events = read_events_multi(paths, overrides)
+            rs = compute_rate(events, args.bin_length)
+        except (SpliceError, DataFormatError, OSError) as exc:
+            print("error: {0}".format(exc), file=sys.stderr)
+            return 2
+        except RateError as exc:
+            print("error: detector {0}: {1}".format(name, exc), file=sys.stderr)
+            return 2
+
+        external_press = external_temp = None
+        if args.met_source == "external":
+            try:
+                external_press, external_temp = fetch_external_meteorology(
+                    rs, args.lat, args.lon, cache
+                )
+            except FetchError as exc:
+                met_warnings.append(
+                    "detector {0}: external meteorology unavailable ({1}); "
+                    "using onboard sensors".format(name, exc)
+                )
+                external_press = external_temp = None
+
+        try:
+            correction = correct(
+                rs,
+                method=args.correction_method,
+                beta_p_percent=args.beta_p,
+                beta_t_percent=args.beta_t,
+                press_hpa=external_press,
+                temp_c=external_temp,
+            )
+        except CorrectionError as exc:
+            print("error: detector {0}: {1}".format(name, exc), file=sys.stderr)
+            return 2
+
+        detectors.append(DetectorSeries(name=name, rs=rs, correction=correction))
+        all_coverage_utc.append((rs.bin_start_utc[0], rs.bin_start_utc[-1]))
+        per_detector_report.append((name, paths, correction, events, rs))
+
+    # One shared master grid over the union span of every detector, used to
+    # fetch and align external data once rather than per detector.
+    union_start = min(c[0] for c in all_coverage_utc)
+    union_end = max(c[1] for c in all_coverage_utc)
+    step_ns = int(args.bin_length * 1e9)
+    n_master = int((union_end - union_start) / np.timedelta64(step_ns, "ns")) + 1
+    master_start = union_start + (np.arange(n_master) * np.timedelta64(step_ns, "ns"))
+    master_mid = master_start + np.timedelta64(step_ns // 2, "ns")
+    master_end_utc = master_start[-1] + np.timedelta64(step_ns, "ns")
+
+    # A lightweight RateSeries-shaped object for align_to_bins, which only
+    # reads bin_start_utc, bin_mid_utc, and bin_length_s.
+    master_rs = RateSeries(
+        bin_start_utc=master_start, bin_mid_utc=master_mid,
+        counts=np.zeros(n_master, dtype=np.int64),
+        livetime_s=np.full(n_master, args.bin_length),
+        rate_hz=np.full(n_master, np.nan), rate_err_hz=np.full(n_master, np.nan),
+        press_hpa=np.zeros(n_master), temp_c=np.zeros(n_master),
+        bin_length_s=float(args.bin_length),
+    )
 
     try:
         station, detector_rigidity, candidates = select_station(
@@ -514,31 +561,61 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     try:
         aligned, warnings, notes, station = gather_external(
-            args, rs, station, detector_rigidity, cache
+            args, master_rs, station, detector_rigidity, cache
         )
     except SourcesError as exc:
         print("error: {0}".format(exc), file=sys.stderr)
         return 2
     warnings = met_warnings + warnings
 
-    summary = format_summary(
-        args.input_file, rs, correction, station, detector_rigidity,
-        candidates, aligned, warnings, notes, args, events.clock_drift_s,
-    )
-    print(summary)
+    # Gaps are shaded only when there is exactly one detector -- with two or
+    # more, per-detector spans are expected to differ and shading them all
+    # would just clutter the shared page.
+    gaps: List[Tuple[np.datetime64, np.datetime64]] = []
+    if len(detectors) == 1:
+        solo_events = per_detector_report[0][3]
+        cov = solo_events.coverage()
+        origin = solo_events.start_utc
+        for i in range(1, len(cov)):
+            g0 = origin + np.timedelta64(int(cov[i - 1][1] * 1e9), "ns")
+            g1 = origin + np.timedelta64(int(cov[i][0] * 1e9), "ns")
+            if g1 > g0:
+                gaps.append((g0, g1))
 
-    run_name = os.path.splitext(os.path.basename(args.input_file))[0]
+    for det_name, det_paths, det_correction, det_events, det_rs in per_detector_report:
+        if len(per_detector_report) > 1:
+            print("=== detector {0} ===".format(det_name))
+        summary = format_summary(
+            ", ".join(os.path.basename(p) for p in det_paths),
+            det_rs, det_correction, station, detector_rigidity,
+            candidates, aligned, warnings, notes, args, det_events.clock_drift_s,
+        )
+        print(summary)
+
+    first_stem = os.path.splitext(os.path.basename(args.input_files[0]))[0]
+    extra = len(args.input_files) - 1
+    run_name = first_stem + ("_+{0}more".format(extra) if extra else "")
     output_dir = args.output_dir or os.path.dirname(
-        os.path.abspath(args.input_file)
+        os.path.abspath(args.input_files[0])
     )
     os.makedirs(output_dir, exist_ok=True)
 
-    if correction.method == "fit":
-        correction_label = "fit: beta_P={0:+.4f} %/hPa, beta_T={1:+.4f} %/C".format(
-            correction.beta_p_percent, correction.beta_t_percent)
+    if len(detectors) == 1:
+        solo_correction = detectors[0].correction
+        if solo_correction.method == "fit":
+            correction_label = (
+                "fit: beta_P={0:+.4f} %/hPa, beta_T={1:+.4f} %/C".format(
+                    solo_correction.beta_p_percent, solo_correction.beta_t_percent)
+            )
+        else:
+            correction_label = "literature: beta_P={0:+.4f} %/hPa ({1})".format(
+                solo_correction.beta_p_percent,
+                args.beta_p_source or "source not stated")
+    elif args.correction_method == "fit":
+        correction_label = "fit (per-detector; see detector lines above)"
     else:
         correction_label = "literature: beta_P={0:+.4f} %/hPa ({1})".format(
-            correction.beta_p_percent, args.beta_p_source or "source not stated")
+            args.beta_p, args.beta_p_source or "source not stated")
 
     footer_notes = [
         "Temperature term corrects a detector systematic (SiPM gain drift), "
@@ -548,21 +625,31 @@ def main(argv: Optional[List[str]] = None) -> int:
     footer_notes.extend("Note: " + n for n in notes)
     footer_notes.extend("Unavailable - " + w for w in warnings)
 
-    run_end_utc = rs.bin_start_utc[-1] + np.timedelta64(
-        int(rs.bin_length_s * 1e9), "ns"
-    )
     requested_sources = ", ".join(
         s.strip() for s in args.sources.split(",") if s.strip()
     ) or "none"
     header_lines = [
-        "Bin size: {0:g} s  ({1} bins, {2:.2f}% mean Poisson error)".format(
-            rs.bin_length_s, len(rs.counts), rs.mean_fractional_error * 100.0),
+        "Bin size: {0:g} s".format(args.bin_length),
         "Detector location: lat {0:.4f}, lon {1:.4f}".format(args.lat, args.lon),
         "Meteorology source: {0}".format(args.met_source),
-        "Time range (UTC): {0} to {1}".format(
-            rs.bin_start_utc[0], run_end_utc),
+        "Time range (UTC): {0} to {1}".format(master_start[0], master_end_utc),
         "External sources requested: {0}".format(requested_sources),
     ]
+    for det_name, det_paths, det_correction, _ev, det_rs in per_detector_report:
+        files = ", ".join(os.path.basename(p) for p in det_paths)
+        if det_correction.method == "fit":
+            coeff = "fit beta_P={0:+.4f} %/hPa, beta_T={1:+.4f} %/C".format(
+                det_correction.beta_p_percent, det_correction.beta_t_percent)
+        else:
+            coeff = "literature beta_P={0:+.4f} %/hPa".format(
+                det_correction.beta_p_percent)
+        header_lines.append(
+            "Detector {0}: {1} ({2} bins, {3:.2f}% mean Poisson error, {4})".format(
+                det_name, files, len(det_rs.counts),
+                det_rs.mean_fractional_error * 100.0, coeff)
+        )
+    for w in met_warnings:
+        header_lines.append("Note: " + w)
 
     meta = PlotMetadata(
         run_name=run_name,
@@ -575,18 +662,33 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     overlay_path = os.path.join(output_dir, run_name + "_overlay.html")
     side_path = os.path.join(output_dir, run_name + "_sidebyside.html")
-    write_html(build_overlay(rs, correction, aligned, meta), overlay_path)
     write_html(
-        build_side_by_side(rs, correction, aligned, meta), side_path,
-        stacked=True,
+        build_overlay(detectors, aligned, meta, master_mid, gaps=gaps),
+        overlay_path,
+    )
+    write_html(
+        build_side_by_side(detectors, aligned, meta, master_mid, gaps=gaps),
+        side_path, stacked=True,
     )
     print("Wrote {0}".format(overlay_path))
     print("Wrote {0}".format(side_path))
 
     if args.export_csv:
-        csv_path = os.path.join(output_dir, run_name + "_binned.csv")
-        write_csv(csv_path, rs, correction, aligned)
-        print("Wrote {0}".format(csv_path))
+        if len(detectors) == 1:
+            csv_path = os.path.join(output_dir, run_name + "_binned.csv")
+            write_csv(csv_path, detectors[0].rs, detectors[0].correction, aligned)
+            print("Wrote {0}".format(csv_path))
+        else:
+            # Each detector keeps its own native bin grid (not the shared
+            # master grid used for external alignment), so per-detector CSVs
+            # carry rate/correction columns only -- the external columns live
+            # on the master grid and are already visible on the shared plots.
+            for det in detectors:
+                csv_path = os.path.join(
+                    output_dir, "{0}_{1}_binned.csv".format(run_name, det.name)
+                )
+                write_csv(csv_path, det.rs, det.correction, [])
+                print("Wrote {0}".format(csv_path))
 
     return 0
 

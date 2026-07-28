@@ -282,9 +282,9 @@ def test_main_falls_back_and_reports_the_station_actually_used(
     captured_meta = {}
     real_build_overlay = process_data.build_overlay
 
-    def spy_build_overlay(rs, correction, aligned, meta):
+    def spy_build_overlay(detectors, aligned, meta, master_utc, gaps=None):
         captured_meta["meta"] = meta
-        return real_build_overlay(rs, correction, aligned, meta)
+        return real_build_overlay(detectors, aligned, meta, master_utc, gaps=gaps)
 
     monkeypatch.setattr(process_data, "build_overlay", spy_build_overlay)
 
@@ -432,6 +432,60 @@ def _minimal_correction_result() -> CorrectionResult:
         t0_c=20.0,
         method="fit",
     )
+
+
+# ---------------------------------------------------------------------------
+# Task 7: multi-file CLI orchestration -- group by detector, stack on one page
+# ---------------------------------------------------------------------------
+
+
+def test_parser_accepts_multiple_files_and_start_time():
+    args = build_parser().parse_args(
+        ["a.txt", "b.txt", "--bin-length", "3600",
+         "--start-time", "b.txt=2026-07-11T00:00:00Z"])
+    assert args.input_files == ["a.txt", "b.txt"]
+    assert args.start_time == ["b.txt=2026-07-11T00:00:00Z"]
+
+
+def test_two_same_detector_files_overlap_exits_nonzero(capsys):
+    path = os.path.join(FIXTURES, "sample_13col.txt")
+    code = main([path, path, "--bin-length", "2", "--sources", "",
+                 "--correction-method", "literature", "--beta-p", "-0.13",
+                 "--output-dir", "/tmp/splice_overlap"])
+    assert code != 0
+    assert "overlap" in capsys.readouterr().err.lower()
+
+
+def test_single_file_still_produces_both_plots(tmp_path):
+    path = os.path.join(FIXTURES, "sample_13col.txt")
+    code = main([path, "--bin-length", "2", "--sources", "",
+                 "--correction-method", "literature", "--beta-p", "-0.13",
+                 "--output-dir", str(tmp_path),
+                 "--cache-dir", str(tmp_path / "cache")])
+    assert code == 0
+    produced = sorted(p.name for p in tmp_path.glob("*.html"))
+    assert any(n.endswith("_overlay.html") for n in produced)
+    assert any(n.endswith("_sidebyside.html") for n in produced)
+
+
+def test_two_different_detector_files_stack_on_one_page(tmp_path):
+    """Two different detectors must run through the pipeline independently
+    and land on ONE stacked overlay/side-by-side page (not one per detector).
+    """
+    path_a = os.path.join(FIXTURES, "sample_13col.txt")
+    path_b = os.path.join(FIXTURES, "det_b.txt")
+    code = main([path_a, path_b, "--bin-length", "2", "--sources", "",
+                 "--correction-method", "literature", "--beta-p", "-0.13",
+                 "--output-dir", str(tmp_path),
+                 "--cache-dir", str(tmp_path / "cache")])
+    assert code == 0
+    produced = sorted(p.name for p in tmp_path.glob("*.html"))
+    overlays = [n for n in produced if n.endswith("_overlay.html")]
+    sides = [n for n in produced if n.endswith("_sidebyside.html")]
+    assert len(overlays) == 1
+    assert len(sides) == 1
+    # run_name derives from the first file's stem, with a "+Nmore" suffix.
+    assert overlays[0].startswith("sample_13col_+1more")
 
 
 def test_summary_mean_raw_rate_is_finite_when_a_bin_is_dead():
