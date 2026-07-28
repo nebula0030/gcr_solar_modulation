@@ -19,6 +19,19 @@ def fx(name):
     return os.path.join(FIXTURES, name)
 
 
+def test_group_by_detector_does_not_full_parse(monkeypatch):
+    """Grouping uses the light first-row read, not a full parse, so a file is
+    not parsed twice (once to group, once to splice)."""
+    import splice as splice_mod
+
+    def boom(*args, **kwargs):
+        raise AssertionError("group_by_detector must not call read_events")
+
+    monkeypatch.setattr(splice_mod, "read_events", boom)
+    groups = group_by_detector([fx("sample_13col.txt"), fx("det_b.txt")])
+    assert list(groups.keys()) == ["TestDet", "DetB"]
+
+
 def test_parse_start_overrides_basename_and_datetime():
     m = parse_start_overrides(["run2.txt=2026-07-11T00:00:00Z"])
     assert "run2.txt" in m

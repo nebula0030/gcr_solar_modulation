@@ -5,9 +5,22 @@ import os
 import numpy as np
 import pytest
 
-from cosmicwatch_io import DataFormatError, read_events
+from cosmicwatch_io import DataFormatError, read_detector_name, read_events
 
 FIXTURES = os.path.join(os.path.dirname(__file__), "fixtures")
+
+
+def test_read_detector_name_matches_full_parse_for_wellformed_file():
+    path = os.path.join(FIXTURES, "sample_13col.txt")
+    # The light read must agree with the full-parse majority name, and must
+    # not require parsing the whole file.
+    assert read_detector_name(path) == read_events(path).detector_name
+    assert read_detector_name(path) == "TestDet"
+
+
+def test_read_detector_name_returns_empty_when_no_valid_row():
+    # The 10-column variant has no 13-column data row.
+    assert read_detector_name(os.path.join(FIXTURES, "sample_10col.txt")) == ""
 
 
 def test_reads_all_events():

@@ -89,6 +89,29 @@ def _parse_wall_clock(time_field: str, date_field: str) -> np.datetime64:
     return np.datetime64(dt, "ns")
 
 
+def read_detector_name(path: str) -> str:
+    """Read only the detector name from a file's first valid data row.
+
+    A cheap alternative to a full ``read_events`` parse when only the ``Name``
+    column is needed (e.g. grouping files by detector): it stops at the first
+    row with the expected column count instead of parsing the whole file.
+    Returns ``""`` if the file has no such row.
+
+    For a well-formed file the ``Name`` column is constant, so this equals
+    ``read_events(path).detector_name``. ``read_events`` resolves the name by
+    majority across all rows; this reads only the first, which differs only
+    for the already-warned pathological mixed-name file.
+    """
+    with open(path, "r", encoding="utf-8", errors="replace") as handle:
+        for lineno, line in enumerate(handle):
+            if lineno < N_HEADER_LINES or not line.strip():
+                continue
+            fields = line.rstrip("\n").split("\t")
+            if len(fields) == N_COLUMNS:
+                return fields[_COL_NAME].strip()
+    return ""
+
+
 def read_events(path: str, chunk_size: int = 500_000) -> Events:
     """Read a v3X data file.
 

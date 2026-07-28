@@ -13,7 +13,7 @@ from typing import Dict, List, Tuple
 
 import numpy as np
 
-from cosmicwatch_io import Events, read_events
+from cosmicwatch_io import Events, read_detector_name, read_events
 
 
 class SpliceError(ValueError):
@@ -49,12 +49,16 @@ def parse_start_overrides(items: List[str]) -> Dict[str, np.datetime64]:
 def group_by_detector(paths: List[str]) -> "OrderedDict[str, List[str]]":
     """Group file paths by detector name, preserving first-seen order.
 
-    Reads each file (to obtain its detector name via the parser). The
-    grouping key is ``Events.detector_name``.
+    Uses a light first-row read (``read_detector_name``) to obtain each file's
+    detector name rather than a full parse -- the full parse happens once, in
+    ``read_events_multi``. The grouping key is the file's first-row detector
+    name (identical to ``read_events``'s majority name for well-formed files).
+    A file with no valid data row falls back to its basename as the key; the
+    full parse in ``read_events_multi`` then surfaces the ``DataFormatError``.
     """
     groups: "OrderedDict[str, List[str]]" = OrderedDict()
     for path in paths:
-        name = read_events(path).detector_name or os.path.basename(path)
+        name = read_detector_name(path) or os.path.basename(path)
         groups.setdefault(name, []).append(path)
     return groups
 
