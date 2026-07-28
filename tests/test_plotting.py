@@ -274,3 +274,30 @@ def test_side_by_side_single_rate_panel_holds_all_detectors():
     # rate panel (row 1) has both detector traces; then 1 external panel.
     rate_traces = [t for t in fig.data if (t.name or "").startswith("Det")]
     assert len(rate_traces) == 2
+
+
+def test_single_detector_gaps_are_shaded():
+    import numpy as np
+    from align import AlignedSeries
+    from plotting import PlotMetadata, build_overlay
+    det = make_detector("DetA")
+    aligned = [AlignedSeries("Kp index", "Kp (0-9)", "GFZ Potsdam",
+                             np.linspace(1, 4, 6), np.zeros(6, bool))]
+    gaps = [(np.datetime64("2026-07-10T02:00:00"),
+             np.datetime64("2026-07-10T03:00:00"))]
+    meta = PlotMetadata("run", "OULU", "fit", [], [])
+    fig = build_overlay([det], aligned, meta, det.rs.bin_mid_utc, gaps=gaps)
+    shapes = fig.layout.to_plotly_json().get("shapes", [])
+    assert any(s.get("type") == "rect" for s in shapes)
+
+
+def test_no_gaps_no_shapes():
+    import numpy as np
+    from align import AlignedSeries
+    from plotting import PlotMetadata, build_overlay
+    det = make_detector("DetA")
+    aligned = []
+    meta = PlotMetadata("run", "OULU", "fit", [], [])
+    fig = build_overlay([det], aligned, meta, det.rs.bin_mid_utc, gaps=None)
+    shapes = fig.layout.to_plotly_json().get("shapes", [])
+    assert not any(s.get("type") == "rect" for s in shapes)

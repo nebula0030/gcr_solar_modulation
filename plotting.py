@@ -205,9 +205,31 @@ def _apply_common_layout(
     )
 
 
+_GAP_FILL_LIGHT = "rgba(137,135,129,0.12)"  # muted ink at low alpha
+
+
 def _add_gap_bands(fig: go.Figure, gaps, per_row: int = 1) -> None:
-    """Shade gap regions. Implemented in Task 6; no-op when gaps is empty."""
-    return
+    """Shade each gap region with a faint band across the plotting area.
+
+    On the overlay (per_row=1) one band spans the y-axis. On the stacked
+    side-by-side the band is added to every panel via ``add_vrect`` (which
+    spans all rows by default). Empty/None gaps -> nothing drawn.
+    """
+    if not gaps:
+        return
+    for start, end in gaps:
+        fig.add_vrect(
+            x0=start, x1=end,
+            fillcolor=_GAP_FILL_LIGHT, line_width=0, layer="below",
+        )
+    # Label the first gap as "no data".
+    first_start, first_end = gaps[0]
+    mid = first_start + (first_end - first_start) / 2
+    fig.add_annotation(
+        x=mid, y=1.0, yref="paper", yanchor="bottom",
+        text="no data", showarrow=False,
+        font=dict(size=10, color=_MUTED_INK),
+    )
 
 
 def build_overlay(
