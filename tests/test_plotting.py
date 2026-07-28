@@ -301,3 +301,32 @@ def test_no_gaps_no_shapes():
     fig = build_overlay([det], aligned, meta, det.rs.bin_mid_utc, gaps=None)
     shapes = fig.layout.to_plotly_json().get("shapes", [])
     assert not any(s.get("type") == "rect" for s in shapes)
+
+
+def test_gap_label_is_classified_muted_so_theme_toggle_does_not_recolor_it(tmp_path):
+    """The 'no data' gap annotation must keep its own role so the theme-toggle
+    JS applies the muted token to it instead of the full-strength subplot
+    text color on the first toggle (see applyTheme's annotationRoles loop)."""
+    import re
+    import json
+    from align import AlignedSeries
+    from plotting import PlotMetadata, build_overlay, write_html
+
+    det = make_detector("DetA")
+    aligned = [AlignedSeries("Kp index", "Kp (0-9)", "GFZ Potsdam",
+                             np.linspace(1, 4, 6), np.zeros(6, bool))]
+    gaps = [(np.datetime64("2026-07-10T02:00:00"),
+             np.datetime64("2026-07-10T03:00:00"))]
+    meta = PlotMetadata("run", "OULU", "fit", [], [])
+    fig = build_overlay([det], aligned, meta, det.rs.bin_mid_utc, gaps=gaps)
+
+    out = tmp_path / "overlay.html"
+    write_html(fig, str(out))
+    content = out.read_text()
+
+    match = re.search(r"var CFG = (\{.*?\});", content)
+    assert match is not None, "CFG config block not found in page"
+    cfg = json.loads(match.group(1))
+
+    assert "muted" in cfg["annotationRoles"]
+    assert "no data" in content

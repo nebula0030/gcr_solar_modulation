@@ -229,6 +229,7 @@ def _add_gap_bands(fig: go.Figure, gaps, per_row: int = 1) -> None:
         x=mid, y=1.0, yref="paper", yanchor="bottom",
         text="no data", showarrow=False,
         font=dict(size=10, color=_MUTED_INK),
+        name="gap-label",
     )
 
 
@@ -479,7 +480,7 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
     if (CFG.hasSecondaryAxis) {{ lay["yaxis2.linecolor"] = t.axis; }}
     CFG.annotationRoles.forEach(function (role, i) {{
       lay["annotations[" + i + "].font.color"] =
-        role === "header" ? t.secondary : t.text;
+        role === "muted" ? t.muted : (role === "header" ? t.secondary : t.text);
     }});
     Plotly.relayout(gd, lay);
     Plotly.restyle(gd, {{
@@ -597,9 +598,14 @@ def write_html(fig: go.Figure, path: str, stacked: bool = False) -> None:
     else:
         row_of_trace = [1] * len(fig.data)
     n_rows = (1 + (len(fig.data) - n_detectors)) if stacked else 1
-    # Every remaining annotation is a subplot title (the metadata header is now
-    # HTML, not a figure annotation).
-    annotation_roles = ["subplot"] * len(fig.layout.annotations)
+    # Every remaining annotation is a subplot title EXCEPT the gap-band "no
+    # data" label, which carries its own muted styling that must survive
+    # theme toggles instead of being recolored like a subplot title (the
+    # metadata header is now HTML, not a figure annotation).
+    annotation_roles = [
+        "muted" if (ann.name == "gap-label" or ann.text == "no data") else "subplot"
+        for ann in fig.layout.annotations
+    ]
 
     fig_meta = fig.layout.meta or {}
     header_title = fig_meta.get("header_title", "Muon Rate vs. Solar Activity")
