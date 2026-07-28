@@ -288,7 +288,16 @@ def test_single_detector_gaps_are_shaded():
     meta = PlotMetadata("run", "OULU", "fit", [], [])
     fig = build_overlay([det], aligned, meta, det.rs.bin_mid_utc, gaps=gaps)
     shapes = fig.layout.to_plotly_json().get("shapes", [])
-    assert any(s.get("type") == "rect" for s in shapes)
+    rects = [s for s in shapes if s.get("type") == "rect"]
+    assert rects
+    # Guard the datetime64-scalar serialization bug: a bare `np.datetime64`
+    # passed straight to add_vrect gets JSON-encoded via `.item()`, which at
+    # nanosecond precision yields a plain integer (ns since epoch) rather
+    # than a date string, landing the band off the date axis entirely. x0/x1
+    # must be ISO-8601 date strings, not ints.
+    rect = rects[0]
+    assert isinstance(rect["x0"], str) and "2026-07-10T02" in rect["x0"]
+    assert isinstance(rect["x1"], str) and "2026-07-10T03" in rect["x1"]
 
 
 def test_no_gaps_no_shapes():

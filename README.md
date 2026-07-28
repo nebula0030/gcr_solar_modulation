@@ -72,21 +72,9 @@ name grows a `+1more` suffix once more than one file contributes). With
 columns.
 
 On the plots, the gap is visible as a break in the line (no point is
-drawn for a NaN bin). The code also intends to draw a shaded gray band
-and a "no data" label over the gap; a headless-Chrome render of the real
-gap output showed the label mis-positioned at the far-left edge of the
-plot and no visible shading in the gap region at all (confirmed by
-pixel-sampling the screenshot: solid white, no tint, at the gap's
-x-range). This traces to `plotting._add_gap_bands` passing bare
-`numpy.datetime64[ns]` scalars to `fig.add_vrect`/`add_annotation`:
-Plotly's JSON encoder serializes a `datetime64` *array* (as used for
-trace `x` data) to ISO-8601 strings, but serializes a bare `datetime64`
-scalar via `.item()`, which for nanosecond precision returns a plain
-integer (nanoseconds since epoch) rather than a date string — so the
-shape and label land at nonsensical coordinates on the date axis. This
-is a real, reproducible rendering bug, not a documentation gap; treat
-the line break and the NaN rows in an exported CSV as the reliable way
-to locate a gap until it's fixed.
+drawn for a NaN bin) and as a shaded gray band with a "no data" label
+spanning the gap region, confirmed by a headless-Chrome render of the
+real gap output above.
 
 **`--start-time FILE=DATETIME`** overrides one file's start time; repeat
 the flag once per file that needs it. `FILE` matches by basename (not

@@ -208,6 +208,19 @@ def _apply_common_layout(
 _GAP_FILL_LIGHT = "rgba(137,135,129,0.12)"  # muted ink at low alpha
 
 
+def _iso(dt64: np.datetime64) -> str:
+    """Render a datetime64 scalar as an ISO-8601 string for Plotly.
+
+    Plotly's JSON encoder serializes a datetime64 *array* (as used for trace
+    ``x`` data) to ISO-8601 strings correctly, but a bare datetime64 *scalar*
+    (as passed to ``add_vrect``/``add_annotation``) goes through ``.item()``,
+    which for nanosecond precision returns a plain integer (ns since epoch)
+    that lands off the date axis. Downcasting to microsecond precision first
+    forces ``str()`` to produce a clean ISO string instead.
+    """
+    return str(np.datetime64(dt64, "us"))
+
+
 def _add_gap_bands(fig: go.Figure, gaps, per_row: int = 1) -> None:
     """Shade each gap region with a faint band across the plotting area.
 
@@ -219,14 +232,14 @@ def _add_gap_bands(fig: go.Figure, gaps, per_row: int = 1) -> None:
         return
     for start, end in gaps:
         fig.add_vrect(
-            x0=start, x1=end,
+            x0=_iso(start), x1=_iso(end),
             fillcolor=_GAP_FILL_LIGHT, line_width=0, layer="below",
         )
     # Label the first gap as "no data".
     first_start, first_end = gaps[0]
     mid = first_start + (first_end - first_start) / 2
     fig.add_annotation(
-        x=mid, y=1.0, yref="paper", yanchor="bottom",
+        x=_iso(mid), y=1.0, yref="paper", yanchor="bottom",
         text="no data", showarrow=False,
         font=dict(size=10, color=_MUTED_INK),
         name="gap-label",
