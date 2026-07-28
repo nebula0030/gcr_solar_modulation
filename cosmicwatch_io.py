@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 import numpy as np
 
@@ -30,6 +30,7 @@ _COL_ADC = 3
 _COL_DEADTIME = 5
 _COL_TEMP = 6
 _COL_PRESS = 7
+_COL_NAME = 10
 _COL_TIME = 11
 _COL_DATE = 12
 
@@ -50,6 +51,7 @@ class Events:
     press_pa: np.ndarray
     start_utc: np.datetime64
     clock_drift_s: float
+    detector_name: str = ""
 
     @property
     def press_hpa(self) -> np.ndarray:
@@ -120,6 +122,7 @@ def read_events(path: str, chunk_size: int = 500_000) -> Events:
     last_wall: Optional[np.datetime64] = None
     saw_any_row = False
     saw_wrong_width = False
+    name_counts: Dict[str, int] = {}
 
     with open(path, "r", encoding="utf-8", errors="replace") as handle:
         for lineno, line in enumerate(handle):
@@ -141,6 +144,7 @@ def read_events(path: str, chunk_size: int = 500_000) -> Events:
                 temp = float(fields[_COL_TEMP])
                 press = float(fields[_COL_PRESS])
                 wall = _parse_wall_clock(fields[_COL_TIME], fields[_COL_DATE])
+                name = fields[_COL_NAME].strip()
             except ValueError:
                 # Truncated or corrupt row. Nothing has been committed yet,
                 # so skipping it is just a `continue`.
@@ -157,6 +161,7 @@ def read_events(path: str, chunk_size: int = 500_000) -> Events:
             if first_wall is None:
                 first_wall = wall
             last_wall = wall
+            name_counts[name] = name_counts.get(name, 0) + 1
 
             if len(timestamps) >= chunk_size:
                 _flush_chunk()
@@ -177,6 +182,16 @@ def read_events(path: str, chunk_size: int = 500_000) -> Events:
     span_by_wall = float((last_wall - first_wall) / np.timedelta64(1, "s"))
     clock_drift_s = span_by_wall - span_by_timestamp
 
+    detector_name = ""
+    if name_counts:
+        detector_name = max(name_counts, key=name_counts.get)
+        if len(name_counts) > 1:
+            import warnings
+            warnings.warn(
+                "file {0!r} has multiple detector names {1}; using majority "
+                "{2!r}".format(path, sorted(name_counts), detector_name)
+            )
+
     return Events(
         timestamp_s=timestamp_arr,
         flag=np.concatenate(flag_chunks),
@@ -186,4 +201,5 @@ def read_events(path: str, chunk_size: int = 500_000) -> Events:
         press_pa=np.concatenate(press_chunks),
         start_utc=first_wall,
         clock_drift_s=clock_drift_s,
+        detector_name=detector_name,
     )

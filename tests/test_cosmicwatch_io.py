@@ -185,3 +185,18 @@ def test_chunking_does_not_change_result(tmp_path):
     assert ev_small_chunks.deadtime_s.dtype == np.float64
     assert ev_small_chunks.temp_c.dtype == np.float64
     assert ev_small_chunks.press_pa.dtype == np.float64
+
+
+def test_detector_name_read_from_name_column():
+    ev = read_events(os.path.join(FIXTURES, "sample_13col.txt"))
+    assert ev.detector_name == "TestDet"
+
+
+def test_detector_name_uses_majority_and_warns_when_inconsistent():
+    import warnings as _w
+    path = os.path.join(FIXTURES, "sample_13col_mixed_name.txt")
+    with _w.catch_warnings(record=True) as caught:
+        _w.simplefilter("always")
+        ev = read_events(path)
+    assert ev.detector_name == "DetA"  # 3 rows DetA vs 1 row DetB
+    assert any("name" in str(x.message).lower() for x in caught)
