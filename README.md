@@ -35,6 +35,114 @@ warning because the run's barometric pressure only spanned 2.6 hPa. All four
 external sources (NMDB, GOES, Kp, sunspot number) were retrieved successfully
 for that run.
 
+## Multiple files and detectors
+
+More than one file can be passed on the command line:
+
+```bash
+.venv/bin/python process_data.py file1.txt file2.txt [...] --bin-length SECONDS [options]
+```
+
+Each file is grouped by the detector name in its `Name` column (column 11
+of the v3X format) — not by filename. The majority `Name` value among a
+file's rows decides which detector it belongs to; a minority of
+differently-named rows in the same file is reported as a warning, not an
+error.
+
+**Same detector, multiple files: splicing.** Files that share a detector
+`Name` are spliced onto one absolute time axis, for a run that was
+interrupted and resumed. Verified by re-running a real ~2.74-day
+`NebuLab_004` file alongside a second copy of itself given a synthetic
+start three days after the first ends:
+
+```bash
+.venv/bin/python process_data.py \
+  CW_NebuLab_004_2026-07-10_04-16-31.txt part2.txt \
+  --start-time part2.txt=2026-07-15T00:00:00Z \
+  --bin-length 3600 --correction-method literature --beta-p -0.13
+```
+
+The console reported one detector (`NebuLab_004`), listed both input
+files, 181 complete 1-hour bins spanning 2026-07-10 04:16 to 2026-07-17
+17:16 UTC, and wrote one `_overlay.html`/`_sidebyside.html` pair (the run
+name grows a `+1more` suffix once more than one file contributes). With
+`--export-csv`, the gap between the files' coverage — 2026-07-12T22:16 to
+2026-07-14T23:16 in this run — showed up as 49 consecutive bins with
+`counts=0`, `livetime_s=0`, and `nan` rate/error/pressure/temperature
+columns.
+
+On the plots, the gap is visible as a break in the line (no point is
+drawn for a NaN bin). The code also intends to draw a shaded gray band
+and a "no data" label over the gap; a headless-Chrome render of the real
+gap output showed the label mis-positioned at the far-left edge of the
+plot and no visible shading in the gap region at all (confirmed by
+pixel-sampling the screenshot: solid white, no tint, at the gap's
+x-range). This traces to `plotting._add_gap_bands` passing bare
+`numpy.datetime64[ns]` scalars to `fig.add_vrect`/`add_annotation`:
+Plotly's JSON encoder serializes a `datetime64` *array* (as used for
+trace `x` data) to ISO-8601 strings, but serializes a bare `datetime64`
+scalar via `.item()`, which for nanosecond precision returns a plain
+integer (nanoseconds since epoch) rather than a date string — so the
+shape and label land at nonsensical coordinates on the date axis. This
+is a real, reproducible rendering bug, not a documentation gap; treat
+the line break and the NaN rows in an exported CSV as the reliable way
+to locate a gap until it's fixed.
+
+**`--start-time FILE=DATETIME`** overrides one file's start time; repeat
+the flag once per file that needs it. `FILE` matches by basename (not
+full path); `DATETIME` is ISO-8601 UTC, e.g. `2026-07-15T00:00:00Z`. This
+is needed because the detector's `Timestamp[s]` column is seconds since
+power-on, not wall-clock time, so a multi-file splice has no way to know
+the true gap (or overlap) between files without it.
+
+**Same detector, overlapping time ranges: an error.** If two files
+resolve to the same detector `Name` and their absolute time spans
+overlap, the tool refuses to splice them and exits nonzero rather than
+silently double-counting events:
+
+```
+error: files 'a.txt' and 'b.txt' overlap in time by 237014.3 s; fix their clocks or drop one
+```
+
+Confirmed with exit code 2 on a real run (the same file passed in
+twice). Use `--start-time` if the files are genuinely sequential and
+just need their clocks corrected, or drop one file if they're
+duplicates.
+
+**Different detectors stack on one page.** Files whose `Name` columns
+differ are *not* spliced; each is treated as its own detector and all
+detectors are plotted together against one shared external-data fetch
+(one NMDB station, one GOES/Kp/sunspot pull, covering the union of every
+detector's time span). Verified with the reference file alongside a
+truncated, relabeled copy (first 50,000 lines, `Name` rewritten to
+`AxLab_test`):
+
+```bash
+.venv/bin/python process_data.py \
+  CW_NebuLab_004_2026-07-10_04-16-31.txt axlab_test.txt \
+  --bin-length 3600 --correction-method literature --beta-p -0.13
+```
+
+The console printed one full summary block per detector (`=== detector
+NebuLab_004 ===`, `=== detector AxLab_test ===`), each with its own
+event count, bin count, and fitted/supplied correction. The two
+detectors overlap in absolute time (`AxLab_test` covers the first ~4.5
+hours of `NebuLab_004`'s 65-hour run) and that is allowed — the
+same-detector overlap check only applies within one detector's `Name`.
+The overlay page rendered one percent-deviation trace per detector (two
+distinct colors, confirmed by screenshot, one legend entry and checkbox
+each); the side-by-side page puts both detectors' traces in a single
+shared rate panel, with one additional panel per external source.
+Per-detector binned CSVs are exported with the detector name appended,
+e.g. `..._NebuLab_004_binned.csv` and `..._AxLab_test_binned.csv`. Gap
+shading only applies when there is exactly one detector — with two or
+more, no gap bands are drawn even if an individual detector's coverage
+has an internal gap, since per-detector spans are expected to differ
+and shading all of them would just clutter the page.
+
+A single file behaves exactly as it always has — everything above is
+additive.
+
 ## How it works
 
 1. **Parse.** Reads the 13-column v3X format. Timestamps are treated as UTC.
