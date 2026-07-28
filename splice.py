@@ -57,3 +57,92 @@ def group_by_detector(paths: List[str]) -> "OrderedDict[str, List[str]]":
         name = read_events(path).detector_name or os.path.basename(path)
         groups.setdefault(name, []).append(path)
     return groups
+
+
+def _absolute_start(events: Events, basename: str,
+                    overrides: Dict[str, np.datetime64]) -> np.datetime64:
+    """The file's absolute UTC start: an override if given, else its clock."""
+    if basename in overrides:
+        return overrides[basename]
+    return events.start_utc
+
+
+def read_events_multi(
+    paths: List[str], start_overrides: Dict[str, np.datetime64]
+) -> Events:
+    """Splice one detector's files onto one absolute-UTC axis.
+
+    All ``paths`` are expected to share a detector name (the caller groups by
+    detector). Returns a single ``Events`` whose ``timestamp_s`` is seconds
+    from the earliest file's start, whose ``deadtime_s`` is cumulative across
+    the whole record, and whose ``coverage_s`` lists each file's span.
+
+    Raises ``SpliceError`` if two files overlap in absolute time.
+    """
+    if not paths:
+        raise SpliceError("no files to splice")
+
+    parsed = []  # (basename, events, abs_start_datetime64, span_seconds)
+    for path in paths:
+        events = read_events(path)
+        basename = os.path.basename(path)
+        abs_start = _absolute_start(events, basename, start_overrides)
+        span = float(events.timestamp_s[-1] - events.timestamp_s[0])
+        parsed.append((basename, events, abs_start, span))
+
+    # Chronological order by absolute start.
+    parsed.sort(key=lambda item: item[2])
+
+    # Absolute end of each file, for overlap detection.
+    def abs_end(abs_start, span):
+        return abs_start + np.timedelta64(int(round(span * 1e9)), "ns")
+
+    for i in range(1, len(parsed)):
+        prev_name, _, prev_start, prev_span = parsed[i - 1]
+        name, _, start, _ = parsed[i]
+        prev_end = abs_end(prev_start, prev_span)
+        if start < prev_end:
+            overlap_s = float((prev_end - start) / np.timedelta64(1, "s"))
+            raise SpliceError(
+                "files {0!r} and {1!r} overlap in time by {2:.1f} s; fix "
+                "their clocks or drop one".format(prev_name, name, overlap_s)
+            )
+
+    t0 = parsed[0][2]  # earliest absolute start (numpy datetime64)
+
+    ts_parts: List[np.ndarray] = []
+    flag_parts: List[np.ndarray] = []
+    adc_parts: List[np.ndarray] = []
+    dead_parts: List[np.ndarray] = []
+    temp_parts: List[np.ndarray] = []
+    press_parts: List[np.ndarray] = []
+    coverage: List[Tuple[float, float]] = []
+
+    deadtime_offset = 0.0
+    for basename, events, abs_start, span in parsed:
+        # Seconds of this file's start from the global origin.
+        start_s = float((abs_start - t0) / np.timedelta64(1, "s"))
+        local = events.timestamp_s - events.timestamp_s[0]  # 0-based within file
+        ts_parts.append(start_s + local)
+        flag_parts.append(events.flag)
+        adc_parts.append(events.adc)
+        dead_parts.append(events.deadtime_s + deadtime_offset)
+        temp_parts.append(events.temp_c)
+        press_parts.append(events.press_pa)
+        coverage.append((start_s, start_s + span))
+        deadtime_offset += float(events.deadtime_s[-1])
+
+    detector_name = parsed[0][1].detector_name
+
+    return Events(
+        timestamp_s=np.concatenate(ts_parts),
+        flag=np.concatenate(flag_parts),
+        adc=np.concatenate(adc_parts),
+        deadtime_s=np.concatenate(dead_parts),
+        temp_c=np.concatenate(temp_parts),
+        press_pa=np.concatenate(press_parts),
+        start_utc=np.datetime64(t0, "ns"),
+        clock_drift_s=0.0,
+        detector_name=detector_name,
+        coverage_s=coverage,
+    )
