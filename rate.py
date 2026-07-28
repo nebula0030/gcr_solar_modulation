@@ -10,6 +10,7 @@ cumulative deadtime counter across that bin.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import List, Tuple
 
 import numpy as np
 
@@ -92,7 +93,8 @@ def compute_rate(events: Events, bin_length_s: float) -> RateSeries:
     # Cumulative deadtime interpolated onto the bin edges, then differenced.
     deadtime_at_edges = np.interp(edges, t, events.deadtime_s)
     deadtime_per_bin = np.diff(deadtime_at_edges)
-    livetime_s = bin_length_s - deadtime_per_bin
+    covered_per_bin = _covered_per_bin(edges, events.coverage())
+    livetime_s = covered_per_bin - deadtime_per_bin
 
     # A bin whose livetime is not strictly positive (deadtime increase >=
     # the bin width, i.e. the detector was effectively dead the whole bin)
@@ -127,6 +129,22 @@ def compute_rate(events: Events, bin_length_s: float) -> RateSeries:
         temp_c=temp_c,
         bin_length_s=float(bin_length_s),
     )
+
+
+def _covered_per_bin(
+    edges: np.ndarray, coverage: List[Tuple[float, float]]
+) -> np.ndarray:
+    """Covered seconds within each bin: overlap of the bin with coverage.
+
+    Coverage intervals are disjoint (spliced files never overlap), so summing
+    per-interval overlaps is exact.
+    """
+    covered = np.zeros(len(edges) - 1, dtype=np.float64)
+    for c0, c1 in coverage:
+        lo = np.maximum(edges[:-1], c0)
+        hi = np.minimum(edges[1:], c1)
+        covered += np.maximum(0.0, hi - lo)
+    return covered
 
 
 def _bin_mean(t: np.ndarray, values: np.ndarray, edges: np.ndarray) -> np.ndarray:

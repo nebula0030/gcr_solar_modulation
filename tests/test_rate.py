@@ -157,3 +157,44 @@ def test_empty_events_raises_rate_error():
     ev = make_events([], [], [])
     with pytest.raises(RateError):
         compute_rate(ev, bin_length_s=10.0)
+
+
+def test_gap_bins_are_nan_when_coverage_has_a_hole():
+    # Events cover [0,10] and [30,40]; the 10 s bins over [10,30) are a gap.
+    ev = make_events(
+        timestamps=[0.0, 5.0, 10.0, 30.0, 35.0, 40.0],
+        flags=[1, 1, 1, 1, 1, 1],
+        deadtimes=[0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+    )
+    ev.coverage_s = [(0.0, 10.0), (30.0, 40.0)]
+    rs = compute_rate(ev, bin_length_s=10.0)
+    # bins: [0,10],[10,20],[20,30],[30,40] -> gap bins 1 and 2 are NaN.
+    assert not np.isnan(rs.rate_hz[0])
+    assert np.isnan(rs.rate_hz[1])
+    assert np.isnan(rs.rate_hz[2])
+    assert not np.isnan(rs.rate_hz[3])
+
+
+def test_partial_coverage_bin_uses_covered_duration_for_livetime():
+    # One bin [0,10] covered only for its first 4 s.
+    ev = make_events(
+        timestamps=[0.0, 1.0, 2.0, 3.0, 10.0, 11.0],
+        flags=[1, 1, 1, 1, 1, 1],
+        deadtimes=[0.0] * 6,
+    )
+    ev.coverage_s = [(0.0, 4.0), (10.0, 11.0)]
+    rs = compute_rate(ev, bin_length_s=10.0)
+    # bin 0 covered duration is 4 s, not 10 s.
+    assert rs.livetime_s[0] == pytest.approx(4.0)
+
+
+def test_default_coverage_reproduces_full_span_behaviour():
+    # No coverage_s set -> identical to a continuous run.
+    ev = make_events(
+        timestamps=[float(i) for i in range(101)],
+        flags=[1] * 101,
+        deadtimes=[0.0] * 101,
+    )
+    rs = compute_rate(ev, bin_length_s=100.0)
+    assert rs.livetime_s[0] == pytest.approx(100.0)
+    assert not np.any(np.isnan(rs.rate_hz))

@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -52,6 +52,7 @@ class Events:
     start_utc: np.datetime64
     clock_drift_s: float
     detector_name: str = ""
+    coverage_s: Optional[List[Tuple[float, float]]] = None
 
     @property
     def press_hpa(self) -> np.ndarray:
@@ -67,6 +68,17 @@ class Events:
         """
         offsets = self.timestamp_s - self.timestamp_s[0]
         return self.start_utc + (offsets * 1e9).astype("timedelta64[ns]")
+
+    def coverage(self) -> List[Tuple[float, float]]:
+        """Coverage intervals in the timestamp_s timebase.
+
+        ``None`` means one continuous span from the first to the last event.
+        """
+        if self.coverage_s is not None:
+            return self.coverage_s
+        if len(self.timestamp_s) == 0:
+            return []
+        return [(float(self.timestamp_s[0]), float(self.timestamp_s[-1]))]
 
 
 def _parse_wall_clock(time_field: str, date_field: str) -> np.datetime64:
