@@ -61,6 +61,11 @@ def test_read_events_multi_single_file_matches_read_events():
     assert combined.detector_name == single.detector_name
     assert combined.coverage_s is not None
     assert len(combined.coverage_s) == 1
+    # Pin the zero-basing formula: the single-file combined timeline is just
+    # the original timestamps shifted so the first event is at t=0.
+    assert np.allclose(
+        combined.timestamp_s, single.timestamp_s - single.timestamp_s[0]
+    )
 
 
 def test_read_events_multi_two_files_with_a_gap(tmp_path):
@@ -91,3 +96,45 @@ def test_read_events_multi_same_detector_overlap_raises():
 def test_read_events_multi_deadtime_is_globally_monotonic():
     combined = read_events_multi([fx("sample_13col.txt")], {})
     assert np.all(np.diff(combined.deadtime_s) >= 0)
+
+
+def test_read_events_multi_deadtime_cumulates_across_files(tmp_path):
+    # Splice two copies of the same fixture, with the second file starting
+    # well after the first ends, so read_events_multi actually has to walk
+    # two files and offset the second file's deadtime by the running total
+    # from the first. A single-file test can't exercise this: with only one
+    # iteration, deadtime_offset is always 0.
+    import shutil
+    from cosmicwatch_io import read_events
+
+    src = fx("sample_13col.txt")
+    second = tmp_path / "sample_13col_b.txt"
+    shutil.copy(src, str(second))
+    overrides = parse_start_overrides(
+        ["sample_13col_b.txt=2026-07-11T00:00:00Z"])
+    combined = read_events_multi([src, str(second)], overrides)
+
+    # 1) Globally monotonic non-decreasing, as before.
+    assert np.all(np.diff(combined.deadtime_s) >= 0)
+
+    # 2) The cross-file cumulation actually happened: the second file's
+    # events must be offset by the first file's final deadtime. Both files
+    # are byte-identical copies of the same fixture, so the second file's
+    # own (un-offset) deadtime values are known from read_events on the
+    # source directly.
+    first = read_events(src)
+    n1 = len(first.timestamp_s)
+    d1_last = float(first.deadtime_s[-1])
+    second_first_deadtime = float(first.deadtime_s[0])
+
+    assert len(combined.deadtime_s) == 2 * n1
+    # The first event contributed by the second file sits right after the
+    # first file's n1 events in the concatenated array.
+    assert combined.deadtime_s[n1] == pytest.approx(
+        d1_last + second_first_deadtime
+    )
+    # Equivalently, and more simply: it must exceed the first file's final
+    # deadtime. If `+ deadtime_offset` were removed from read_events_multi,
+    # this would be exactly d1_last's own small increment (i.e. it would
+    # NOT include d1_last), so this assertion would fail.
+    assert combined.deadtime_s[n1] > d1_last
