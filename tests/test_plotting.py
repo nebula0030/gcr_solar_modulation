@@ -5,7 +5,13 @@ import pytest
 
 from align import AlignedSeries
 from correction import CorrectionResult
-from plotting import PlotMetadata, build_overlay, build_side_by_side, write_html
+from plotting import (
+    DetectorSeries,
+    PlotMetadata,
+    build_overlay,
+    build_side_by_side,
+    write_html,
+)
 from rate import RateSeries
 
 
@@ -52,9 +58,20 @@ def make_inputs(n=6):
     return rs, correction, aligned, meta
 
 
+def make_detector(name, n=6, base=0.47):
+    start = np.datetime64("2026-07-10T00:00:00.000000000")
+    off = (np.arange(n) * 3600.0 * 1e9).astype("timedelta64[ns]")
+    rs = RateSeries(start + off, start + off, np.full(n, 1700, dtype=np.int64),
+                    np.full(n, 3600.0), np.full(n, base), np.full(n, 0.01),
+                    np.linspace(1006, 1010, n), np.linspace(22, 25, n), 3600.0)
+    cr = CorrectionResult(np.full(n, base), np.full(n, 0.01), -0.0013, -0.004,
+                          2e-4, 5e-4, 0.85, 1008.0, 23.5, "fit", [])
+    return DetectorSeries(name=name, rs=rs, correction=cr)
+
+
 def test_overlay_contains_the_corrected_rate_trace():
     rs, corr, aligned, meta = make_inputs()
-    fig = build_overlay(rs, corr, aligned, meta)
+    fig = build_overlay([DetectorSeries("Muon rate", rs, corr)], aligned, meta, rs.bin_mid_utc)
     names = [t.name for t in fig.data]
     assert any("Muon rate" in n for n in names)
 
@@ -62,14 +79,14 @@ def test_overlay_contains_the_corrected_rate_trace():
 def test_overlay_does_not_plot_the_raw_rate():
     """The spec calls for corrected rate only."""
     rs, corr, aligned, meta = make_inputs()
-    fig = build_overlay(rs, corr, aligned, meta)
+    fig = build_overlay([DetectorSeries("Muon rate", rs, corr)], aligned, meta, rs.bin_mid_utc)
     names = [t.name or "" for t in fig.data]
     assert not any("raw" in n.lower() for n in names)
 
 
 def test_overlay_includes_every_aligned_series():
     rs, corr, aligned, meta = make_inputs()
-    fig = build_overlay(rs, corr, aligned, meta)
+    fig = build_overlay([DetectorSeries("Muon rate", rs, corr)], aligned, meta, rs.bin_mid_utc)
     names = " ".join(t.name or "" for t in fig.data)
     assert "Neutron monitor" in names
     assert "Kp index" in names
@@ -77,13 +94,13 @@ def test_overlay_includes_every_aligned_series():
 
 def test_side_by_side_has_one_row_per_series_plus_the_rate():
     rs, corr, aligned, meta = make_inputs()
-    fig = build_side_by_side(rs, corr, aligned, meta)
+    fig = build_side_by_side([DetectorSeries("Muon rate", rs, corr)], aligned, meta, rs.bin_mid_utc)
     assert len(fig.data) >= 3
 
 
 def test_side_by_side_links_the_x_axes():
     rs, corr, aligned, meta = make_inputs()
-    fig = build_side_by_side(rs, corr, aligned, meta)
+    fig = build_side_by_side([DetectorSeries("Muon rate", rs, corr)], aligned, meta, rs.bin_mid_utc)
     layout = fig.layout.to_plotly_json()
     linked = [
         key for key, axis in layout.items()
@@ -95,7 +112,7 @@ def test_side_by_side_links_the_x_axes():
 
 def test_hover_marks_interpolated_points():
     rs, corr, aligned, meta = make_inputs()
-    fig = build_overlay(rs, corr, aligned, meta)
+    fig = build_overlay([DetectorSeries("Muon rate", rs, corr)], aligned, meta, rs.bin_mid_utc)
     kp = [t for t in fig.data if (t.name or "").startswith("Kp")][0]
     text = " ".join(str(x) for x in (kp.text or []))
     assert "interpolated" in text.lower()
@@ -103,7 +120,7 @@ def test_hover_marks_interpolated_points():
 
 def test_write_html_produces_a_self_contained_file(tmp_path):
     rs, corr, aligned, meta = make_inputs()
-    fig = build_overlay(rs, corr, aligned, meta)
+    fig = build_overlay([DetectorSeries("Muon rate", rs, corr)], aligned, meta, rs.bin_mid_utc)
     out = tmp_path / "overlay.html"
     write_html(fig, str(out))
     content = out.read_text()
@@ -115,8 +132,8 @@ def test_write_html_produces_a_self_contained_file(tmp_path):
 def test_page_has_a_checkbox_per_series(tmp_path):
     rs, corr, aligned, meta = make_inputs()
     for kind, fig, stacked in (
-        ("overlay", build_overlay(rs, corr, aligned, meta), False),
-        ("side", build_side_by_side(rs, corr, aligned, meta), True),
+        ("overlay", build_overlay([DetectorSeries("Muon rate", rs, corr)], aligned, meta, rs.bin_mid_utc), False),
+        ("side", build_side_by_side([DetectorSeries("Muon rate", rs, corr)], aligned, meta, rs.bin_mid_utc), True),
     ):
         out = tmp_path / (kind + ".html")
         write_html(fig, str(out), stacked=stacked)
@@ -129,7 +146,7 @@ def test_page_has_a_checkbox_per_series(tmp_path):
 def test_page_has_a_theme_toggle(tmp_path):
     rs, corr, aligned, meta = make_inputs()
     out = tmp_path / "overlay.html"
-    write_html(build_overlay(rs, corr, aligned, meta), str(out))
+    write_html(build_overlay([DetectorSeries("Muon rate", rs, corr)], aligned, meta, rs.bin_mid_utc), str(out))
     content = out.read_text()
     assert 'id="theme-toggle"' in content
     assert "Switch to dark mode" in content
@@ -140,7 +157,7 @@ def test_page_has_a_theme_toggle(tmp_path):
 def test_page_has_matplotlib_style_line_spec_for_the_muon_rate(tmp_path):
     rs, corr, aligned, meta = make_inputs()
     out = tmp_path / "overlay.html"
-    write_html(build_overlay(rs, corr, aligned, meta), str(out))
+    write_html(build_overlay([DetectorSeries("Muon rate", rs, corr)], aligned, meta, rs.bin_mid_utc), str(out))
     content = out.read_text()
     assert 'id="line-spec"' in content
     for spec in ("o-", "-", "o", "--", "."):
@@ -154,7 +171,7 @@ def test_stacked_page_collapses_deselected_panels(tmp_path):
     trace and leave an empty panel behind."""
     rs, corr, aligned, meta = make_inputs()
     out = tmp_path / "side.html"
-    write_html(build_side_by_side(rs, corr, aligned, meta), str(out), stacked=True)
+    write_html(build_side_by_side([DetectorSeries("Muon rate", rs, corr)], aligned, meta, rs.bin_mid_utc), str(out), stacked=True)
     content = out.read_text()
     assert '"stacked": true' in content
     assert ".domain" in content
@@ -163,8 +180,8 @@ def test_stacked_page_collapses_deselected_panels(tmp_path):
 
 def test_figures_build_with_no_external_series():
     rs, corr, _, meta = make_inputs()
-    assert build_overlay(rs, corr, [], meta) is not None
-    assert build_side_by_side(rs, corr, [], meta) is not None
+    assert build_overlay([DetectorSeries("Muon rate", rs, corr)], [], meta, rs.bin_mid_utc) is not None
+    assert build_side_by_side([DetectorSeries("Muon rate", rs, corr)], [], meta, rs.bin_mid_utc) is not None
 
 
 def test_header_block_shows_bin_size_and_inputs_on_both_figures(tmp_path):
@@ -174,8 +191,8 @@ def test_header_block_shows_bin_size_and_inputs_on_both_figures(tmp_path):
         "Detector location: lat 37.3688, lon -122.0363",
     ]
     for kind, fig, stacked in (
-        ("overlay", build_overlay(rs, corr, aligned, meta), False),
-        ("side", build_side_by_side(rs, corr, aligned, meta), True),
+        ("overlay", build_overlay([DetectorSeries("Muon rate", rs, corr)], aligned, meta, rs.bin_mid_utc), False),
+        ("side", build_side_by_side([DetectorSeries("Muon rate", rs, corr)], aligned, meta, rs.bin_mid_utc), True),
     ):
         out = tmp_path / (kind + ".html")
         write_html(fig, str(out), stacked=stacked)
@@ -192,8 +209,8 @@ def test_header_block_shows_bin_size_and_inputs_on_both_figures(tmp_path):
 def test_titles_are_title_cased(tmp_path):
     rs, corr, aligned, meta = make_inputs()
     for kind, fig, stacked in (
-        ("overlay", build_overlay(rs, corr, aligned, meta), False),
-        ("side", build_side_by_side(rs, corr, aligned, meta), True),
+        ("overlay", build_overlay([DetectorSeries("Muon rate", rs, corr)], aligned, meta, rs.bin_mid_utc), False),
+        ("side", build_side_by_side([DetectorSeries("Muon rate", rs, corr)], aligned, meta, rs.bin_mid_utc), True),
     ):
         out = tmp_path / (kind + ".html")
         write_html(fig, str(out), stacked=stacked)
@@ -204,7 +221,7 @@ def test_header_is_not_baked_into_the_figure_margin():
     """The metadata header must be HTML, not a tall figure top-margin that
     steals vertical space from the graphs."""
     rs, corr, aligned, meta = make_inputs()
-    side = build_side_by_side(rs, corr, aligned, meta)
+    side = build_side_by_side([DetectorSeries("Muon rate", rs, corr)], aligned, meta, rs.bin_mid_utc)
     # top margin only needs to clear the first subplot title now.
     assert side.layout.margin.t <= 80
     # bin-size text is stashed for the HTML page, not added as an annotation.
@@ -216,7 +233,7 @@ def test_overlay_has_no_rangeslider():
     """The bottom range-slider was removed; nothing sits below the plot to
     overlap with footer text."""
     rs, corr, aligned, meta = make_inputs()
-    fig = build_overlay(rs, corr, aligned, meta)
+    fig = build_overlay([DetectorSeries("Muon rate", rs, corr)], aligned, meta, rs.bin_mid_utc)
     xaxis = fig.layout.to_plotly_json().get("xaxis", {})
     rs_cfg = xaxis.get("rangeslider")
     assert not (rs_cfg and rs_cfg.get("visible"))
@@ -226,11 +243,34 @@ def test_no_annotation_is_anchored_below_the_plot():
     """All descriptive text now lives in the top margin (y >= 1), so none of
     it can cover the graphs."""
     rs, corr, aligned, meta = make_inputs()
-    for fig in (build_overlay(rs, corr, aligned, meta),
-                build_side_by_side(rs, corr, aligned, meta)):
+    for fig in (build_overlay([DetectorSeries("Muon rate", rs, corr)], aligned, meta, rs.bin_mid_utc),
+                build_side_by_side([DetectorSeries("Muon rate", rs, corr)], aligned, meta, rs.bin_mid_utc)):
         for ann in fig.layout.annotations:
             if ann.yref == "paper" and ann.y is not None and ann.text \
                     and "Bin size" not in (ann.text or "") and ann.y < 0:
                 raise AssertionError(
                     "descriptive annotation below plot: {0!r}".format(ann.text)
                 )
+
+
+def test_overlay_has_one_trace_per_detector():
+    dets = [make_detector("DetA", base=0.47), make_detector("DetB", base=0.30)]
+    aligned = [AlignedSeries("Neutron monitor (OULU)", "counts/s", "NMDB",
+                             np.linspace(98, 100, 6), np.zeros(6, bool))]
+    meta = PlotMetadata("run", "OULU", "fit", [], [])
+    master_utc = dets[0].rs.bin_mid_utc
+    fig = build_overlay(dets, aligned, meta, master_utc)
+    names = " ".join(t.name or "" for t in fig.data)
+    assert "DetA" in names and "DetB" in names
+
+
+def test_side_by_side_single_rate_panel_holds_all_detectors():
+    dets = [make_detector("DetA"), make_detector("DetB")]
+    aligned = [AlignedSeries("Kp index", "Kp (0-9)", "GFZ Potsdam",
+                             np.linspace(1, 4, 6), np.zeros(6, bool))]
+    meta = PlotMetadata("run", "OULU", "fit", [], [])
+    master_utc = dets[0].rs.bin_mid_utc
+    fig = build_side_by_side(dets, aligned, meta, master_utc)
+    # rate panel (row 1) has both detector traces; then 1 external panel.
+    rate_traces = [t for t in fig.data if (t.name or "").startswith("Det")]
+    assert len(rate_traces) == 2

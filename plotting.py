@@ -24,7 +24,7 @@ from __future__ import annotations
 import html
 import json
 from dataclasses import dataclass, field
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import numpy as np
 import plotly.graph_objects as go
@@ -52,6 +52,19 @@ _SERIES_COLORS = (
 
 #: dataviz categorical palette, slot 1 (blue) -- the muon rate's fixed colour.
 _MUON_COLOR = "#2a78d6"
+
+#: Fixed colour order: detector 0 anchors on blue (today's muon-rate colour),
+#: then every subsequent detector and every external series draw from the
+#: remaining slots in order -- never cycled arbitrarily.
+_ALL_SLOTS = (_MUON_COLOR,) + _SERIES_COLORS  # blue, then slots 2-8
+
+
+def _detector_color(index: int) -> str:
+    return _ALL_SLOTS[index % len(_ALL_SLOTS)]
+
+
+def _external_color(index: int, n_detectors: int) -> str:
+    return _ALL_SLOTS[(n_detectors + index) % len(_ALL_SLOTS)]
 
 #: dataviz chart chrome tokens (light surface).
 _GRIDLINE_COLOR = "#e1e0d9"
@@ -94,6 +107,15 @@ _LINE_SPECS = (
     ("--", "--  dashed line", "lines", "dash", 8),
     (".", ".   fine points", "markers", "solid", 4),
 )
+
+
+@dataclass
+class DetectorSeries:
+    """One detector's corrected rate, for stacking on a shared axis."""
+
+    name: str
+    rs: "RateSeries"
+    correction: "CorrectionResult"
 
 
 @dataclass
@@ -183,144 +205,121 @@ def _apply_common_layout(
     )
 
 
+def _add_gap_bands(fig: go.Figure, gaps, per_row: int = 1) -> None:
+    """Shade gap regions. Implemented in Task 6; no-op when gaps is empty."""
+    return
+
+
 def build_overlay(
-    rs: RateSeries,
-    correction: CorrectionResult,
+    detectors: List[DetectorSeries],
     aligned: List[AlignedSeries],
     meta: PlotMetadata,
+    master_utc: np.ndarray,
+    gaps: Optional[List[Tuple[np.datetime64, np.datetime64]]] = None,
 ) -> go.Figure:
-    """One shared time axis; comparable series as percent deviation."""
+    """One shared time axis; each detector as percent deviation, external on
+    the secondary axis (plotted at the shared master grid)."""
     fig = go.Figure()
 
-    mean_rate = float(np.nanmean(correction.corrected_rate_hz))
-    rate_pct = 100.0 * (correction.corrected_rate_hz - mean_rate) / mean_rate
-    rate_err_pct = 100.0 * correction.corrected_err_hz / mean_rate
-
-    fig.add_trace(
-        go.Scatter(
-            x=rs.bin_mid_utc,
-            y=rate_pct,
+    for d_index, det in enumerate(detectors):
+        color = _detector_color(d_index)
+        corrected = det.correction.corrected_rate_hz
+        mean_rate = float(np.nanmean(corrected))
+        rate_pct = 100.0 * (corrected - mean_rate) / mean_rate
+        rate_err_pct = 100.0 * det.correction.corrected_err_hz / mean_rate
+        fig.add_trace(go.Scatter(
+            x=det.rs.bin_mid_utc, y=rate_pct,
             error_y=dict(type="data", array=rate_err_pct, visible=True,
                          thickness=1),
-            name="Muon rate (corrected)",
+            name="{0} (corrected)".format(det.name),
             mode="lines+markers",
-            line=dict(color=_MUON_COLOR, width=2),
-            marker=dict(size=8),
-            hovertemplate="Muon rate: %{y:.2f}%<extra></extra>",
-        )
-    )
+            line=dict(color=color, width=2), marker=dict(size=8),
+            hovertemplate="{0}: %{{y:.2f}}%<extra></extra>".format(det.name),
+        ))
 
-    color_index = 0
-    for series in aligned:
-        color = _SERIES_COLORS[color_index % len(_SERIES_COLORS)]
-        color_index += 1
+    for e_index, series in enumerate(aligned):
+        color = _external_color(e_index, len(detectors))
         if series.source in MODULATION_SOURCES:
-            fig.add_trace(
-                go.Scatter(
-                    x=rs.bin_mid_utc,
-                    y=series.percent_deviation,
-                    name="{0} (% dev)".format(series.name),
-                    mode="lines",
-                    line=dict(color=color, width=2),
-                    text=_hover_text(series),
-                    hovertemplate="%{text}<extra></extra>",
-                )
-            )
+            fig.add_trace(go.Scatter(
+                x=master_utc, y=series.percent_deviation,
+                name="{0} (% dev)".format(series.name), mode="lines",
+                line=dict(color=color, width=2),
+                text=_hover_text(series),
+                hovertemplate="%{text}<extra></extra>",
+            ))
         else:
-            fig.add_trace(
-                go.Scatter(
-                    x=rs.bin_mid_utc,
-                    y=series.values,
-                    name="{0} [{1}]".format(series.name, series.units),
-                    mode="lines",
-                    yaxis="y2",
-                    line=dict(color=color, width=2, dash="dot"),
-                    text=_hover_text(series),
-                    hovertemplate="%{text}<extra></extra>",
-                )
-            )
+            fig.add_trace(go.Scatter(
+                x=master_utc, y=series.values,
+                name="{0} [{1}]".format(series.name, series.units),
+                mode="lines", yaxis="y2",
+                line=dict(color=color, width=2, dash="dot"),
+                text=_hover_text(series),
+                hovertemplate="%{text}<extra></extra>",
+            ))
 
     fig.update_layout(
-        xaxis=dict(
-            title="Time (UTC)",
-            gridcolor=_GRIDLINE_COLOR, linecolor=_MUTED_INK,
-        ),
-        yaxis=dict(
-            title="Deviation from run mean (%)",
-            gridcolor=_GRIDLINE_COLOR, linecolor=_MUTED_INK,
-        ),
+        xaxis=dict(title="Time (UTC)", gridcolor=_GRIDLINE_COLOR,
+                   linecolor=_MUTED_INK),
+        yaxis=dict(title="Deviation from run mean (%)",
+                   gridcolor=_GRIDLINE_COLOR, linecolor=_MUTED_INK),
         yaxis2=dict(title="Other indices (native units)", overlaying="y",
                     side="right", showgrid=False, linecolor=_MUTED_INK),
         legend=dict(orientation="h", yanchor="top", y=-0.14, x=0),
     )
-    _apply_common_layout(
-        fig, meta, "Muon Rate vs. Solar Activity — Overlay",
-        plot_height=460, bottom_margin=120,
-    )
+    _add_gap_bands(fig, gaps)
+    _apply_common_layout(fig, meta, "Muon Rate vs. Solar Activity — Overlay",
+                         plot_height=460, bottom_margin=120)
     return fig
 
 
 def build_side_by_side(
-    rs: RateSeries,
-    correction: CorrectionResult,
+    detectors: List[DetectorSeries],
     aligned: List[AlignedSeries],
     meta: PlotMetadata,
+    master_utc: np.ndarray,
+    gaps: Optional[List[Tuple[np.datetime64, np.datetime64]]] = None,
 ) -> go.Figure:
-    """Stacked panels in native units with linked x-axes."""
+    """One rate panel (all detectors overlaid) plus one panel per external
+    source, sharing a linked time axis."""
     n_rows = 1 + len(aligned)
     titles = ["Muon Rate (Corrected) [Hz]"] + [
         _titlecase("{0} [{1}]".format(s.name, s.units)) for s in aligned
     ]
-    fig = make_subplots(
-        rows=n_rows, cols=1, shared_xaxes=True,
-        vertical_spacing=min(0.06, 0.6 / max(n_rows, 1)),
-        subplot_titles=titles,
-    )
+    fig = make_subplots(rows=n_rows, cols=1, shared_xaxes=True,
+                        vertical_spacing=min(0.06, 0.6 / max(n_rows, 1)),
+                        subplot_titles=titles)
 
-    fig.add_trace(
-        go.Scatter(
-            x=rs.bin_mid_utc,
-            y=correction.corrected_rate_hz,
-            error_y=dict(type="data", array=correction.corrected_err_hz,
+    for d_index, det in enumerate(detectors):
+        fig.add_trace(go.Scatter(
+            x=det.rs.bin_mid_utc, y=det.correction.corrected_rate_hz,
+            error_y=dict(type="data", array=det.correction.corrected_err_hz,
                          visible=True, thickness=1),
-            name="Muon rate (corrected)",
+            name="{0} (corrected)".format(det.name),
             mode="lines+markers",
-            line=dict(color=_MUON_COLOR, width=2),
+            line=dict(color=_detector_color(d_index), width=2),
             marker=dict(size=8),
-            hovertemplate="%{y:.4f} Hz<extra></extra>",
-        ),
-        row=1, col=1,
-    )
+            hovertemplate="{0}: %{{y:.4f}} Hz<extra></extra>".format(det.name),
+        ), row=1, col=1)
 
-    for index, series in enumerate(aligned):
-        color = _SERIES_COLORS[index % len(_SERIES_COLORS)]
+    for e_index, series in enumerate(aligned):
         log_scale = "W/m" in series.units
-        fig.add_trace(
-            go.Scatter(
-                x=rs.bin_mid_utc,
-                y=series.values,
-                name=series.name,
-                mode="lines",
-                line=dict(color=color, width=2),
-                text=_hover_text(series),
-                hovertemplate="%{text}<extra></extra>",
-            ),
-            row=index + 2, col=1,
-        )
+        fig.add_trace(go.Scatter(
+            x=master_utc, y=series.values, name=series.name, mode="lines",
+            line=dict(color=_external_color(e_index, len(detectors)), width=2),
+            text=_hover_text(series),
+            hovertemplate="%{text}<extra></extra>",
+        ), row=e_index + 2, col=1)
         if log_scale:
-            fig.update_yaxes(type="log", row=index + 2, col=1)
+            fig.update_yaxes(type="log", row=e_index + 2, col=1)
 
     fig.update_xaxes(title_text="Time (UTC)", row=n_rows, col=1)
     fig.update_xaxes(matches="x", gridcolor=_GRIDLINE_COLOR, linecolor=_MUTED_INK)
     fig.update_yaxes(gridcolor=_GRIDLINE_COLOR, linecolor=_MUTED_INK)
     fig.update_layout(showlegend=False)
-    _apply_common_layout(
-        fig, meta, "Muon Rate vs. Solar Activity — Aligned Panels",
-        plot_height=max(240 * n_rows, 480),
-    )
-    # make_subplots with shared_xaxes should set `matches`; the explicit
-    # update_xaxes(matches="x") above guarantees it regardless of Plotly
-    # version behaviour.
+    _add_gap_bands(fig, gaps, per_row=n_rows)
+    _apply_common_layout(fig, meta,
+                         "Muon Rate vs. Solar Activity — Aligned Panels",
+                         plot_height=max(240 * n_rows, 480))
     return fig
 
 
@@ -482,11 +481,19 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
     Plotly.restyle(gd, {{ visible: vis }});
 
     if (!CFG.stacked) {{ fitHeight(); return; }}
-    /* Collapse hidden panels so the remaining ones expand to fill. */
-    var shownRows = [], hiddenRows = [];
+    /* Collapse hidden panels so the remaining ones expand to fill. Row 1 is
+       the shared rate panel: it stays visible if ANY detector box is
+       checked, and collapses only when every detector box is unchecked. */
+    var rowsShown = {{}};
     boxes.forEach(function (b, i) {{
-      (b.checked ? shownRows : hiddenRows).push(CFG.rowOfTrace[i]);
+      var row = CFG.rowOfTrace[i];
+      if (b.checked) {{ rowsShown[row] = true; }}
+      else if (!(row in rowsShown)) {{ rowsShown[row] = false; }}
     }});
+    var shownRows = [], hiddenRows = [];
+    for (var r = 1; r <= CFG.nRows; r++) {{
+      if (rowsShown[r]) {{ shownRows.push(r); }} else {{ hiddenRows.push(r); }}
+    }}
     if (!shownRows.length) {{ return; }}
     var gap = 0.06, k = shownRows.length;
     var h = (1 - gap * (k - 1)) / k;
@@ -560,7 +567,14 @@ def write_html(fig: go.Figure, path: str, stacked: bool = False) -> None:
     names = [t.name or "Series {0}".format(i + 1) for i, t in enumerate(fig.data)]
     light, dark = _trace_colors(fig)
 
-    n_rows = len(fig.data) if stacked else 1
+    n_detectors = sum(1 for t in fig.data
+                      if (t.name or "").endswith("(corrected)"))
+    if stacked:
+        row_of_trace = [1] * n_detectors + list(
+            range(2, len(fig.data) - n_detectors + 2))
+    else:
+        row_of_trace = [1] * len(fig.data)
+    n_rows = (1 + (len(fig.data) - n_detectors)) if stacked else 1
     # Every remaining annotation is a subplot title (the metadata header is now
     # HTML, not a figure annotation).
     annotation_roles = ["subplot"] * len(fig.layout.annotations)
@@ -574,12 +588,13 @@ def write_html(fig: go.Figure, path: str, stacked: bool = False) -> None:
         "traceColors": {"light": light, "dark": dark},
         "stacked": stacked,
         "nRows": n_rows,
+        "nDetectors": n_detectors,
         "topMargin": int(fig.layout.margin.t or 90),
         "bottomMargin": int(fig.layout.margin.b or 90),
         "perPanelPx": 240,
         "minPanelPx": 150,
         "minOverlayPlot": 340,
-        "rowOfTrace": list(range(1, len(fig.data) + 1)) if stacked else [1] * len(fig.data),
+        "rowOfTrace": row_of_trace,
         "muonTrace": 0,
         "hasSecondaryAxis": not stacked,
         "annotationRoles": annotation_roles,
