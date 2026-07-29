@@ -8,6 +8,7 @@ import pytest
 from splice import (
     SpliceError,
     group_by_detector,
+    parse_end_overrides,
     parse_start_overrides,
     read_events_multi,
 )
@@ -151,3 +152,68 @@ def test_read_events_multi_deadtime_cumulates_across_files(tmp_path):
     # this would be exactly d1_last's own small increment (i.e. it would
     # NOT include d1_last), so this assertion would fail.
     assert combined.deadtime_s[n1] > d1_last
+
+
+def test_parse_end_overrides_basename_and_datetime():
+    m = parse_end_overrides(["run.txt=2026-07-11T00:00:00Z"])
+    assert m["run.txt"] == np.datetime64("2026-07-11T00:00:00")
+
+
+def test_parse_end_overrides_rejects_malformed_item():
+    with pytest.raises(SpliceError):
+        parse_end_overrides(["no-equals-sign"])
+
+
+def test_parse_end_overrides_rejects_bad_datetime():
+    with pytest.raises(SpliceError):
+        parse_end_overrides(["run.txt=not-a-date"])
+
+
+def test_end_time_truncates_events_after_cutoff():
+    # sample_13col.txt: 6 events at t=0..5 s from 2026-07-10T00:00:00 (its own
+    # clock). Cut off at +2 s -> keep events at absolute 00:00:00..00:00:02.
+    ends = parse_end_overrides(["sample_13col.txt=2026-07-10T00:00:02Z"])
+    ev = read_events_multi([fx("sample_13col.txt")], {}, ends)
+    # events at 0,1,2 s kept (inclusive); 3,4,5 dropped.
+    assert len(ev.timestamp_s) == 3
+    assert ev.coverage_s[0][1] == pytest.approx(2.0)
+
+
+def test_end_time_boundary_event_is_kept():
+    ends = parse_end_overrides(["sample_13col.txt=2026-07-10T00:00:03Z"])
+    ev = read_events_multi([fx("sample_13col.txt")], {}, ends)
+    assert len(ev.timestamp_s) == 4  # 0,1,2,3 s
+
+
+def test_end_before_start_raises():
+    ends = parse_end_overrides(["sample_13col.txt=2026-07-09T00:00:00Z"])
+    with pytest.raises(SpliceError) as exc:
+        read_events_multi([fx("sample_13col.txt")], {}, ends)
+    assert "sample_13col.txt" in str(exc.value)
+
+
+def test_end_time_can_resolve_an_overlap(tmp_path):
+    # First file (own clock) spans 00:00:00..00:00:05. A second copy started at
+    # +3s spans 00:00:03..00:00:08 -> the two overlap.
+    import shutil
+    src = fx("sample_13col.txt")
+    second = tmp_path / "sample_13col_b.txt"
+    shutil.copy(src, str(second))
+    starts = parse_start_overrides(["sample_13col_b.txt=2026-07-10T00:00:03Z"])
+
+    # Without any end-time, the overlap is a SpliceError.
+    with pytest.raises(SpliceError):
+        read_events_multi([src, str(second)], starts)
+
+    # Truncating the first file to end at +2s removes the overlap.
+    ends = parse_end_overrides(["sample_13col.txt=2026-07-10T00:00:02Z"])
+    ev = read_events_multi([src, str(second)], starts, ends)  # must not raise
+    assert len(ev.coverage_s) == 2
+    assert ev.coverage_s[0][1] == pytest.approx(2.0)  # first file truncated
+
+
+def test_no_end_overrides_matches_two_arg_call():
+    a = read_events_multi([fx("sample_13col.txt")], {})
+    b = read_events_multi([fx("sample_13col.txt")], {}, {})
+    assert len(a.timestamp_s) == len(b.timestamp_s)
+    assert a.coverage_s == b.coverage_s

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import os
 from collections import OrderedDict
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -20,18 +20,19 @@ class SpliceError(ValueError):
     """Raised when files cannot be spliced (overlap, bad override, etc.)."""
 
 
-def parse_start_overrides(items: List[str]) -> Dict[str, np.datetime64]:
+def _parse_datetime_overrides(
+    items: List[str], flag_name: str
+) -> Dict[str, np.datetime64]:
     """Parse ``["FILE=ISO8601", ...]`` into a basename -> datetime64 map.
 
-    ``FILE`` is reduced to its basename so it matches how files are keyed
-    elsewhere. A malformed item or an unparseable datetime raises
-    ``SpliceError``.
+    ``FILE`` is reduced to its basename. A malformed item or an unparseable
+    datetime raises ``SpliceError`` (with ``flag_name`` in the message).
     """
     overrides: Dict[str, np.datetime64] = {}
     for item in items:
         if "=" not in item:
             raise SpliceError(
-                "bad --start-time {0!r}; expected FILE=ISO8601".format(item)
+                "bad {0} {1!r}; expected FILE=ISO8601".format(flag_name, item)
             )
         raw_path, raw_dt = item.split("=", 1)
         key = os.path.basename(raw_path.strip())
@@ -40,10 +41,20 @@ def parse_start_overrides(items: List[str]) -> Dict[str, np.datetime64]:
             when = np.datetime64(text, "ns")
         except ValueError:
             raise SpliceError(
-                "bad --start-time datetime {0!r} for {1!r}".format(raw_dt, key)
+                "bad {0} datetime {1!r} for {2!r}".format(flag_name, raw_dt, key)
             )
         overrides[key] = when
     return overrides
+
+
+def parse_start_overrides(items: List[str]) -> Dict[str, np.datetime64]:
+    """Parse ``--start-time`` items (see ``_parse_datetime_overrides``)."""
+    return _parse_datetime_overrides(items, "--start-time")
+
+
+def parse_end_overrides(items: List[str]) -> Dict[str, np.datetime64]:
+    """Parse ``--end-time`` items (see ``_parse_datetime_overrides``)."""
+    return _parse_datetime_overrides(items, "--end-time")
 
 
 def group_by_detector(paths: List[str]) -> "OrderedDict[str, List[str]]":
@@ -71,8 +82,39 @@ def _absolute_start(events: Events, basename: str,
     return events.start_utc
 
 
+def _truncate_to_end(
+    events: Events, abs_start: np.datetime64, end: np.datetime64, basename: str
+) -> Events:
+    """Return ``events`` with only those whose absolute time is <= ``end``.
+
+    Absolute time of each event is ``abs_start + (timestamp_s - timestamp_s[0])``.
+    The boundary is inclusive. Raises ``SpliceError`` if nothing remains.
+    """
+    import dataclasses
+
+    local = events.timestamp_s - events.timestamp_s[0]
+    abs_ns = abs_start + (local * 1e9).astype("timedelta64[ns]")
+    keep = abs_ns <= end
+    if not np.any(keep):
+        raise SpliceError(
+            "--end-time {0} for {1!r} precedes the file's start; it removes "
+            "every event".format(str(end), basename)
+        )
+    return dataclasses.replace(
+        events,
+        timestamp_s=events.timestamp_s[keep],
+        flag=events.flag[keep],
+        adc=events.adc[keep],
+        deadtime_s=events.deadtime_s[keep],
+        temp_c=events.temp_c[keep],
+        press_pa=events.press_pa[keep],
+    )
+
+
 def read_events_multi(
-    paths: List[str], start_overrides: Dict[str, np.datetime64]
+    paths: List[str],
+    start_overrides: Dict[str, np.datetime64],
+    end_overrides: Optional[Dict[str, np.datetime64]] = None,
 ) -> Events:
     """Splice one detector's files onto one absolute-UTC axis.
 
@@ -86,11 +128,18 @@ def read_events_multi(
     if not paths:
         raise SpliceError("no files to splice")
 
+    if end_overrides is None:
+        end_overrides = {}
+
     parsed = []  # (basename, events, abs_start_datetime64, span_seconds)
     for path in paths:
         events = read_events(path)
         basename = os.path.basename(path)
         abs_start = _absolute_start(events, basename, start_overrides)
+        if basename in end_overrides:
+            events = _truncate_to_end(
+                events, abs_start, end_overrides[basename], basename
+            )
         span = float(events.timestamp_s[-1] - events.timestamp_s[0])
         parsed.append((basename, events, abs_start, span))
 
