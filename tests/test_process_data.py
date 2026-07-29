@@ -466,13 +466,27 @@ def test_bad_end_time_exits_nonzero(capsys):
 
 def test_end_time_truncates_and_still_writes_plots(tmp_path):
     path = os.path.join(FIXTURES, "sample_13col.txt")
-    code = main([path, "--bin-length", "1", "--sources", "",
-                 "--correction-method", "literature", "--beta-p", "-0.13",
-                 "--end-time", "sample_13col.txt=2026-07-10T00:00:03Z",
-                 "--output-dir", str(tmp_path),
-                 "--cache-dir", str(tmp_path / "cache")])
-    assert code == 0
-    assert any(p.name.endswith("_overlay.html") for p in tmp_path.glob("*.html"))
+
+    def run_and_count_bins(out_sub, extra_args):
+        out = tmp_path / out_sub
+        code = main([path, "--bin-length", "1", "--sources", "",
+                     "--correction-method", "literature", "--beta-p", "-0.13",
+                     "--export-csv",
+                     "--output-dir", str(out),
+                     "--cache-dir", str(tmp_path / "cache")] + extra_args)
+        assert code == 0
+        assert any(p.name.endswith("_overlay.html") for p in out.glob("*.html"))
+        csv_path = next(out.glob("*_binned.csv"))
+        rows = csv_path.read_text().strip().splitlines()
+        return len(rows) - 1  # minus the header row
+
+    full_bins = run_and_count_bins("full", [])
+    truncated_bins = run_and_count_bins(
+        "trunc", ["--end-time", "sample_13col.txt=2026-07-10T00:00:03Z"])
+    # The flag must actually take effect: truncating the file's tail yields
+    # strictly fewer bins than the untruncated run (this fails if --end-time
+    # were silently ignored).
+    assert 0 < truncated_bins < full_bins
 
 
 def test_two_same_detector_files_overlap_exits_nonzero(capsys):
