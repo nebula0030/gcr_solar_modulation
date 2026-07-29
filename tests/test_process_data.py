@@ -447,6 +447,34 @@ def test_parser_accepts_multiple_files_and_start_time():
     assert args.start_time == ["b.txt=2026-07-11T00:00:00Z"]
 
 
+def test_parser_accepts_end_time():
+    args = build_parser().parse_args(
+        ["a.txt", "--bin-length", "3600",
+         "--end-time", "a.txt=2026-07-11T00:00:00Z"])
+    assert args.end_time == ["a.txt=2026-07-11T00:00:00Z"]
+
+
+def test_bad_end_time_exits_nonzero(capsys):
+    path = os.path.join(FIXTURES, "sample_13col.txt")
+    code = main([path, "--bin-length", "2", "--sources", "",
+                 "--correction-method", "literature", "--beta-p", "-0.13",
+                 "--end-time", "sample_13col.txt=not-a-date",
+                 "--output-dir", "/tmp/endtime_bad"])
+    assert code != 0
+    assert "end-time" in capsys.readouterr().err.lower()
+
+
+def test_end_time_truncates_and_still_writes_plots(tmp_path):
+    path = os.path.join(FIXTURES, "sample_13col.txt")
+    code = main([path, "--bin-length", "1", "--sources", "",
+                 "--correction-method", "literature", "--beta-p", "-0.13",
+                 "--end-time", "sample_13col.txt=2026-07-10T00:00:03Z",
+                 "--output-dir", str(tmp_path),
+                 "--cache-dir", str(tmp_path / "cache")])
+    assert code == 0
+    assert any(p.name.endswith("_overlay.html") for p in tmp_path.glob("*.html"))
+
+
 def test_two_same_detector_files_overlap_exits_nonzero(capsys):
     path = os.path.join(FIXTURES, "sample_13col.txt")
     code = main([path, path, "--bin-length", "2", "--sources", "",

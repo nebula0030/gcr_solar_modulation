@@ -34,7 +34,8 @@ from external_sources import (
 from nmdb_stations import Station, StationError, rank_by_rigidity, select_station
 from plotting import DetectorSeries, PlotMetadata, build_overlay, build_side_by_side, write_html
 from rate import RateError, RateSeries, compute_rate
-from splice import SpliceError, group_by_detector, parse_start_overrides, read_events_multi
+from splice import (SpliceError, group_by_detector, parse_end_overrides,
+                    parse_start_overrides, read_events_multi)
 
 ALL_SOURCES = ("nmdb", "goes", "kp", "sunspot")
 
@@ -67,6 +68,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--start-time", action="append", default=[], metavar="FILE=DATETIME",
         help="override a file's start datetime (repeatable); FILE matches "
              "by basename, DATETIME is ISO-8601 UTC",
+    )
+    parser.add_argument(
+        "--end-time", action="append", default=[], metavar="FILE=DATETIME",
+        help="drop a file's events after this datetime (repeatable); the "
+             "truncation counterpart to --start-time. FILE matches by "
+             "basename, DATETIME is ISO-8601 UTC",
     )
 
     location = parser.add_argument_group("detector location")
@@ -474,6 +481,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     try:
         overrides = parse_start_overrides(args.start_time)
+        end_overrides = parse_end_overrides(args.end_time)
         groups = group_by_detector(args.input_files)
     except (SpliceError, DataFormatError, OSError) as exc:
         print("error: {0}".format(exc), file=sys.stderr)
@@ -491,7 +499,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     for name, paths in groups.items():
         try:
-            events = read_events_multi(paths, overrides)
+            events = read_events_multi(paths, overrides, end_overrides)
             rs = compute_rate(events, args.bin_length)
         except (SpliceError, DataFormatError, OSError) as exc:
             print("error: {0}".format(exc), file=sys.stderr)
