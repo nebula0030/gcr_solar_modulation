@@ -368,3 +368,49 @@ def test_figure_config_shapes_for_overlay_and_side():
     # traceColors present for both modes, one entry per trace.
     assert len(ov_cfg["traceColors"]["light"]) == len(ov.data)
     assert len(sb_cfg["traceColors"]["dark"]) == len(sb.data)
+
+
+def test_write_combined_html_one_file_two_figs(tmp_path):
+    from plotting import write_combined_html
+    rs, corr, aligned, meta = make_inputs()
+    dets = [DetectorSeries("Muon rate", rs, corr)]
+    ov = build_overlay(dets, aligned, meta, rs.bin_mid_utc)
+    sb = build_side_by_side(dets, aligned, meta, rs.bin_mid_utc)
+    out = tmp_path / "combined.html"
+    write_combined_html(ov, sb, str(out))
+    content = out.read_text()
+
+    assert content.lstrip().lower().startswith("<!doctype html")
+    # Two plot divs.
+    assert 'id="viz-overlay"' in content and 'id="viz-side"' in content
+    # Tab bar with both buttons.
+    assert 'id="tab-overlay"' in content and 'id="tab-side"' in content
+    # One checkbox per series (3 traces here: 1 detector + 2 external), not two.
+    assert content.count('type="checkbox"') == len(ov.data)
+    # Both figures' configs are embedded.
+    assert '"overlay"' in content and '"side"' in content
+    # Self-contained and non-trivial (JS bundle inlined once).
+    assert len(content) > 100_000
+
+
+def test_combined_inlines_plotly_once(tmp_path):
+    import re
+    from plotting import write_combined_html
+    rs, corr, aligned, meta = make_inputs()
+    dets = [DetectorSeries("Muon rate", rs, corr)]
+    ov = build_overlay(dets, aligned, meta, rs.bin_mid_utc)
+    sb = build_side_by_side(dets, aligned, meta, rs.bin_mid_utc)
+    out = tmp_path / "combined.html"
+    write_combined_html(ov, sb, str(out))
+    content = out.read_text()
+    # Two figures are initialised (one Plotly.newPlot call per div id)...
+    # NOTE: a plain `content.count("Plotly.newPlot")` is not reliable here —
+    # the vendored plotly.min.js bundle itself contains the literal text
+    # "Plotly.newPlot(gd, data, layout, ...)" inside a Mapbox-token help
+    # string, so a naive substring count over-reports by one. Match the
+    # actual init calls by the div id argument instead.
+    init_calls = re.findall(r'Plotly\.newPlot\(\s*"plot-(overlay|side)"', content)
+    assert sorted(init_calls) == ["overlay", "side"]
+    # ...but the ~4-5 MB library bundle is inlined only once (with the overlay);
+    # inlining it twice would push the file past ~8 MB.
+    assert len(content) < 8_000_000

@@ -575,6 +575,246 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
 """
 
 
+_COMBINED_TEMPLATE = """<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>__TITLE__</title>
+<style>
+  :root { color-scheme: light; }
+  html[data-theme="dark"] { color-scheme: dark; }
+  body { margin: 0; padding: 16px;
+    font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, sans-serif;
+    background: var(--surface); color: var(--text); }
+  html[data-theme="light"] body { --surface:#fcfcfb; --text:#0b0b0b;
+    --secondary:#52514e; --panel:#f2f1ec; --border:#d8d7d0; --accent:#2a78d6; }
+  html[data-theme="dark"] body { --surface:#1a1a19; --text:#ffffff;
+    --secondary:#c3c2b7; --panel:#232322; --border:#383835; --accent:#3987e5; }
+  .controls { display:flex; flex-wrap:wrap; gap:18px; align-items:flex-start;
+    background:var(--panel); border:1px solid var(--border); border-radius:8px;
+    padding:12px 14px; margin-bottom:14px; }
+  .controls fieldset { border:0; margin:0; padding:0; }
+  .ctl-label, .controls legend { font-size:12px; font-weight:600;
+    color:var(--secondary); text-transform:uppercase; letter-spacing:.04em;
+    margin-bottom:6px; display:block; }
+  .series-list { display:flex; flex-wrap:wrap; gap:4px 16px; }
+  .series-list label { display:flex; align-items:center; gap:6px;
+    white-space:nowrap; cursor:pointer; }
+  .swatch { width:11px; height:11px; border-radius:2px; flex:none; }
+  select, button { font:inherit; padding:5px 9px; border-radius:6px;
+    border:1px solid var(--border); background:var(--surface); color:var(--text);
+    cursor:pointer; }
+  .run-header { margin:8px 4px 10px; color:var(--secondary); }
+  .run-header > summary { cursor:pointer; font-size:17px; font-weight:700;
+    color:var(--text); margin-bottom:6px; }
+  .run-header .meta { font-size:12px; line-height:1.5; }
+  .tabbar { display:flex; gap:6px; margin:6px 4px 4px; border-bottom:1px solid var(--border); }
+  .tabbar button { border:1px solid var(--border); border-bottom:none;
+    border-radius:6px 6px 0 0; background:var(--panel); padding:7px 16px; }
+  .tabbar button.active { background:var(--surface); color:var(--accent);
+    font-weight:600; }
+  .viz { background:var(--surface); }
+</style>
+</head>
+<body>
+<div class="controls">
+  <div><span class="ctl-label">Appearance</span>
+    <button id="theme-toggle" type="button">Switch to dark mode</button></div>
+  <div><span class="ctl-label">Muon rate line spec</span>
+    <select id="line-spec">__LINE_SPEC_OPTIONS__</select></div>
+  <fieldset><legend>Series</legend>
+    <div class="series-list" id="series-list">__SERIES_CHECKBOXES__</div></fieldset>
+</div>
+<details class="run-header" open>
+  <summary>__HEADER_TITLE__</summary>
+  <div class="meta">__HEADER_META__</div>
+</details>
+<div class="tabbar">
+  <button id="tab-overlay" class="active" type="button">Overlay</button>
+  <button id="tab-side" type="button">Side-by-side</button>
+</div>
+<div id="viz-overlay" class="viz">__PLOT_OVERLAY__</div>
+<div id="viz-side" class="viz" style="display:none">__PLOT_SIDE__</div>
+<script>
+__COMBINED_JS__
+</script>
+</body>
+</html>
+"""
+
+_COMBINED_JS = """
+(function () {
+  var CFG = __CONFIG__;   /* {views:{overlay,side}, themes, lineSpecs} */
+  var GD = { overlay: document.getElementById("viz-overlay").querySelector(".plotly-graph-div"),
+             side: document.getElementById("viz-side").querySelector(".plotly-graph-div") };
+  var VIEWS = ["overlay", "side"];
+  var active = "overlay";
+  var mode = "light";
+  var root = document.documentElement;
+
+  function axisKey(prefix, row) { return row === 1 ? prefix : prefix + row; }
+
+  function checkboxes() {
+    return Array.prototype.slice.call(
+      document.querySelectorAll("#series-list input[type=checkbox]"));
+  }
+
+  /* rows (panels) currently shown in the stacked side view: row is shown if
+     ANY checkbox mapping to it is checked. */
+  function shownRows(cfg, boxes) {
+    var seen = {};
+    boxes.forEach(function (b, i) {
+      var row = cfg.rowOfTrace[i];
+      if (b.checked) { seen[row] = true; }
+      else if (!(row in seen)) { seen[row] = false; }
+    });
+    var rows = [];
+    for (var r = 1; r <= cfg.nRows; r++) { if (seen[r]) { rows.push(r); } }
+    return rows;
+  }
+
+  /* ---- height ------------------------------------------------------- */
+  function chromeHeight() {
+    var h = 24;
+    ["controls", "run-header", "tabbar"].forEach(function (cls) {
+      var el = document.querySelector("." + cls);
+      if (el) { h += el.getBoundingClientRect().height; }
+    });
+    return h;
+  }
+
+  function fitActive() {
+    var cfg = CFG.views[active], gd = GD[active];
+    var avail = window.innerHeight - chromeHeight();
+    var k = cfg.stacked ? Math.max(shownRows(cfg, checkboxes()).length, 1) : 1;
+    var floorPlot = cfg.stacked ? cfg.minPanelPx * k : cfg.minOverlayPlot;
+    var floor = cfg.topMargin + floorPlot + cfg.bottomMargin;
+    var ideal = cfg.stacked
+      ? cfg.topMargin + cfg.perPanelPx * k + cfg.bottomMargin
+      : avail;
+    var target = Math.max(Math.min(ideal, avail), floor);
+    Plotly.relayout(gd, { height: target });
+  }
+
+  window.addEventListener("resize", fitActive);
+  var hdr = document.querySelector(".run-header");
+  if (hdr) { hdr.addEventListener("toggle", fitActive); }
+
+  /* ---- theme (both views) ------------------------------------------- */
+  function applyThemeToView(view, t) {
+    var cfg = CFG.views[view], gd = GD[view];
+    var lay = { "paper_bgcolor": t.surface, "plot_bgcolor": t.surface,
+                "font.color": t.text };
+    for (var r = 1; r <= cfg.nRows; r++) {
+      lay[axisKey("xaxis", r) + ".gridcolor"] = t.grid;
+      lay[axisKey("xaxis", r) + ".linecolor"] = t.axis;
+      lay[axisKey("yaxis", r) + ".gridcolor"] = t.grid;
+      lay[axisKey("yaxis", r) + ".linecolor"] = t.axis;
+    }
+    if (cfg.hasSecondaryAxis) { lay["yaxis2.linecolor"] = t.axis; }
+    cfg.annotationRoles.forEach(function (role, i) {
+      lay["annotations[" + i + "].font.color"] =
+        role === "muted" ? t.muted : (role === "header" ? t.secondary : t.text);
+    });
+    Plotly.relayout(gd, lay);
+    Plotly.restyle(gd, { "line.color": cfg.traceColors[mode],
+                         "marker.color": cfg.traceColors[mode] });
+  }
+
+  function applyTheme(next) {
+    mode = next;
+    var t = CFG.themes[mode];
+    root.setAttribute("data-theme", mode);
+    document.getElementById("theme-toggle").textContent =
+      mode === "dark" ? "Switch to light mode" : "Switch to dark mode";
+    VIEWS.forEach(function (v) { applyThemeToView(v, t); });
+    var colors = CFG.views.overlay.traceColors[mode];
+    document.querySelectorAll(".swatch").forEach(function (sw, i) {
+      sw.style.background = colors[i];
+    });
+  }
+
+  document.getElementById("theme-toggle").addEventListener("click", function () {
+    applyTheme(mode === "dark" ? "light" : "dark");
+  });
+
+  /* ---- series checkboxes (both views) ------------------------------- */
+  function collapseStacked(cfg, gd, boxes) {
+    var rows = shownRows(cfg, boxes);
+    if (!rows.length) { return Promise.resolve(); }
+    var gap = 0.06, k = rows.length, h = (1 - gap * (k - 1)) / k, lay = {};
+    var hidden = [];
+    for (var r = 1; r <= cfg.nRows; r++) {
+      if (rows.indexOf(r) === -1) { hidden.push(r); }
+    }
+    rows.forEach(function (row, i) {
+      var top = 1 - i * (h + gap), isBottom = (i === k - 1);
+      lay[axisKey("yaxis", row) + ".domain"] = [Math.max(top - h, 0), top];
+      lay[axisKey("yaxis", row) + ".visible"] = true;
+      lay[axisKey("xaxis", row) + ".visible"] = true;
+      lay[axisKey("xaxis", row) + ".showticklabels"] = isBottom;
+      lay[axisKey("xaxis", row) + ".title.text"] = isBottom ? "Time (UTC)" : "";
+      lay["annotations[" + (row - 1) + "].y"] = Math.min(top + 0.012, 1);
+      lay["annotations[" + (row - 1) + "].visible"] = true;
+    });
+    hidden.forEach(function (row) {
+      lay[axisKey("yaxis", row) + ".visible"] = false;
+      lay[axisKey("xaxis", row) + ".visible"] = false;
+      lay["annotations[" + (row - 1) + "].visible"] = false;
+    });
+    return Plotly.relayout(gd, lay);
+  }
+
+  function applyVisibility() {
+    var boxes = checkboxes();
+    var vis = boxes.map(function (b) { return b.checked ? true : "legendonly"; });
+    Plotly.restyle(GD.overlay, { visible: vis });
+    Plotly.restyle(GD.side, { visible: vis });
+    collapseStacked(CFG.views.side, GD.side, boxes).then(fitActive);
+  }
+
+  document.getElementById("series-list")
+    .addEventListener("change", applyVisibility);
+
+  /* ---- muon-rate line spec (detector traces, both views) ------------ */
+  document.getElementById("line-spec").addEventListener("change", function (e) {
+    var s = CFG.lineSpecs[e.target.value];
+    VIEWS.forEach(function (v) {
+      var nd = CFG.views[v].nDetectors, idx = [];
+      for (var i = 0; i < nd; i++) { idx.push(i); }
+      Plotly.restyle(GD[v],
+        { mode: s.mode, "line.dash": s.dash, "marker.size": s.size }, idx);
+    });
+  });
+
+  /* ---- tabs --------------------------------------------------------- */
+  function activate(view) {
+    active = view;
+    VIEWS.forEach(function (v) {
+      document.getElementById("viz-" + v).style.display = (v === view) ? "" : "none";
+      document.getElementById("tab-" + v).classList.toggle("active", v === view);
+    });
+    /* Plotly bakes a fallback fixed width (commonly 700px) into a figure
+       that was newPlot'd while its container had display:none (getBoundingClientRect
+       reports 0 there), and Plotly.Plots.resize alone does not override an
+       explicit layout.width once set. Re-enabling autosize forces Plotly to
+       re-measure the now-visible container before resize/fit run. */
+    Plotly.relayout(GD[view], { autosize: true });
+    Plotly.Plots.resize(GD[view]);
+    fitActive();
+  }
+  document.getElementById("tab-overlay").addEventListener("click",
+    function () { activate("overlay"); });
+  document.getElementById("tab-side").addEventListener("click",
+    function () { activate("side"); });
+
+  /* initial sizing of the active (overlay) view */
+  fitActive();
+})();
+"""
+
+
 def _trace_colors(fig: go.Figure) -> Tuple[List[str], List[str]]:
     """Light and dark colour for every trace, in trace order."""
     light, dark = [], []
@@ -678,5 +918,71 @@ def write_html(fig: go.Figure, path: str, stacked: bool = False) -> None:
         plot_div=plot_div,
         config_json=json.dumps(config),
     )
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(page)
+
+
+def write_combined_html(
+    overlay_fig: go.Figure, side_fig: go.Figure, path: str
+) -> None:
+    """Write one self-contained page hosting both figures in tabs.
+
+    Plotly's JS is inlined once (with the overlay); the side-by-side figure
+    reuses it. A shared control bar drives both figures: a series checkbox
+    toggles that series in both views (and collapses the side-by-side panel),
+    the theme toggle recolours both, and the line-spec restyles the detector
+    traces in both. Switching tabs resizes the newly-shown figure.
+    """
+    names = [t.name or "Series {0}".format(i + 1)
+             for i, t in enumerate(overlay_fig.data)]
+    ov_cfg = _figure_config(overlay_fig, stacked=False)
+    sb_cfg = _figure_config(side_fig, stacked=True)
+    light = ov_cfg["traceColors"]["light"]
+
+    fig_meta = overlay_fig.layout.meta or {}
+    header_title = fig_meta.get("header_title", "Muon Rate vs. Solar Activity")
+    header_meta = fig_meta.get("header_meta", "")
+
+    config = {
+        "themes": _THEMES,
+        "lineSpecs": {
+            key: {"mode": mode, "dash": dash, "size": size}
+            for key, _label, mode, dash, size in _LINE_SPECS
+        },
+        "views": {"overlay": ov_cfg, "side": sb_cfg},
+    }
+
+    checkboxes = "".join(
+        '<label><input type="checkbox" checked data-i="{i}">'
+        '<span class="swatch" style="background:{color}"></span>{name}</label>'.format(
+            i=i, color=light[i], name=html.escape(names[i])
+        )
+        for i in range(len(names))
+    )
+    options = "".join(
+        '<option value="{key}"{sel}>{label}</option>'.format(
+            key=html.escape(key), label=html.escape(label),
+            sel=" selected" if key == "o-" else "",
+        )
+        for key, label, _mode, _dash, _size in _LINE_SPECS
+    )
+
+    plot_overlay = overlay_fig.to_html(
+        full_html=False, include_plotlyjs=True, div_id="plot-overlay",
+        config={"scrollZoom": True, "displaylogo": False})
+    plot_side = side_fig.to_html(
+        full_html=False, include_plotlyjs=False, div_id="plot-side",
+        config={"scrollZoom": True, "displaylogo": False})
+
+    js = _COMBINED_JS.replace("__CONFIG__", json.dumps(config))
+    page = (_COMBINED_TEMPLATE
+            .replace("__TITLE__", html.escape(header_title))
+            .replace("__HEADER_TITLE__", html.escape(header_title))
+            .replace("__HEADER_META__", header_meta)
+            .replace("__LINE_SPEC_OPTIONS__", options)
+            .replace("__SERIES_CHECKBOXES__", checkboxes)
+            .replace("__PLOT_OVERLAY__", plot_overlay)
+            .replace("__PLOT_SIDE__", plot_side)
+            .replace("__COMBINED_JS__", js))
     with open(path, "w", encoding="utf-8") as handle:
         handle.write(page)
