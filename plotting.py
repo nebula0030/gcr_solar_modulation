@@ -589,20 +589,10 @@ def _trace_colors(fig: go.Figure) -> Tuple[List[str], List[str]]:
     return light, dark
 
 
-def write_html(fig: go.Figure, path: str, stacked: bool = False) -> None:
-    """Write a self-contained interactive HTML page.
-
-    The page wraps the Plotly figure in a control bar offering a light/dark
-    theme toggle, a per-series checkbox list, and a matplotlib-style line-spec
-    selector for the muon rate (dense runs are easier to read as markers only,
-    where the connecting line would otherwise bury the trend).
-
-    ``stacked`` marks the side-by-side figure, whose checkboxes additionally
-    collapse a deselected panel so the remaining panels expand to fill.
-    """
-    names = [t.name or "Series {0}".format(i + 1) for i, t in enumerate(fig.data)]
+def _figure_config(fig: go.Figure, stacked: bool) -> dict:
+    """Per-figure config consumed by the page JS (colours, row map, margins,
+    axis/annotation metadata). Shared by write_html and write_combined_html."""
     light, dark = _trace_colors(fig)
-
     n_detectors = sum(1 for t in fig.data
                       if (t.name or "").endswith("(corrected)"))
     if stacked:
@@ -611,21 +601,11 @@ def write_html(fig: go.Figure, path: str, stacked: bool = False) -> None:
     else:
         row_of_trace = [1] * len(fig.data)
     n_rows = (1 + (len(fig.data) - n_detectors)) if stacked else 1
-    # Every remaining annotation is a subplot title EXCEPT the gap-band "no
-    # data" label, which carries its own muted styling that must survive
-    # theme toggles instead of being recolored like a subplot title (the
-    # metadata header is now HTML, not a figure annotation).
     annotation_roles = [
         "muted" if (ann.name == "gap-label" or ann.text == "no data") else "subplot"
         for ann in fig.layout.annotations
     ]
-
-    fig_meta = fig.layout.meta or {}
-    header_title = fig_meta.get("header_title", "Muon Rate vs. Solar Activity")
-    header_meta = fig_meta.get("header_meta", "")
-
-    config = {
-        "themes": _THEMES,
+    return {
         "traceColors": {"light": light, "dark": dark},
         "stacked": stacked,
         "nRows": n_rows,
@@ -639,10 +619,33 @@ def write_html(fig: go.Figure, path: str, stacked: bool = False) -> None:
         "muonTrace": 0,
         "hasSecondaryAxis": not stacked,
         "annotationRoles": annotation_roles,
-        "lineSpecs": {
-            key: {"mode": mode, "dash": dash, "size": size}
-            for key, _label, mode, dash, size in _LINE_SPECS
-        },
+    }
+
+
+def write_html(fig: go.Figure, path: str, stacked: bool = False) -> None:
+    """Write a self-contained interactive HTML page.
+
+    The page wraps the Plotly figure in a control bar offering a light/dark
+    theme toggle, a per-series checkbox list, and a matplotlib-style line-spec
+    selector for the muon rate (dense runs are easier to read as markers only,
+    where the connecting line would otherwise bury the trend).
+
+    ``stacked`` marks the side-by-side figure, whose checkboxes additionally
+    collapse a deselected panel so the remaining panels expand to fill.
+    """
+    names = [t.name or "Series {0}".format(i + 1) for i, t in enumerate(fig.data)]
+    cfg = _figure_config(fig, stacked)
+    light = cfg["traceColors"]["light"]
+
+    fig_meta = fig.layout.meta or {}
+    header_title = fig_meta.get("header_title", "Muon Rate vs. Solar Activity")
+    header_meta = fig_meta.get("header_meta", "")
+
+    config = dict(cfg)
+    config["themes"] = _THEMES
+    config["lineSpecs"] = {
+        key: {"mode": mode, "dash": dash, "size": size}
+        for key, _label, mode, dash, size in _LINE_SPECS
     }
 
     checkboxes = "".join(

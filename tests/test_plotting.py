@@ -339,3 +339,32 @@ def test_gap_label_is_classified_muted_so_theme_toggle_does_not_recolor_it(tmp_p
 
     assert "muted" in cfg["annotationRoles"]
     assert "no data" in content
+
+
+def test_figure_config_shapes_for_overlay_and_side():
+    from plotting import _figure_config
+    rs, corr, aligned, meta = make_inputs()
+    dets = [DetectorSeries("Muon rate", rs, corr)]
+    ov = build_overlay(dets, aligned, meta, rs.bin_mid_utc)
+    sb = build_side_by_side(dets, aligned, meta, rs.bin_mid_utc)
+
+    ov_cfg = _figure_config(ov, stacked=False)
+    sb_cfg = _figure_config(sb, stacked=True)
+
+    # Overlay: not stacked, one detector, secondary axis, all traces "row 1".
+    assert ov_cfg["stacked"] is False
+    assert ov_cfg["nDetectors"] == 1
+    assert ov_cfg["hasSecondaryAxis"] is True
+    assert ov_cfg["rowOfTrace"] == [1] * len(ov.data)
+
+    # Side-by-side: stacked, rate panel + external panels, rowOfTrace maps all
+    # detectors to row 1 then externals to 2..; nRows = 1 + n_external.
+    assert sb_cfg["stacked"] is True
+    assert sb_cfg["nDetectors"] == 1
+    assert sb_cfg["hasSecondaryAxis"] is False
+    assert sb_cfg["rowOfTrace"] == [1, 2, 3]  # 1 detector + 2 external panels
+    assert sb_cfg["nRows"] == 3
+
+    # traceColors present for both modes, one entry per trace.
+    assert len(ov_cfg["traceColors"]["light"]) == len(ov.data)
+    assert len(sb_cfg["traceColors"]["dark"]) == len(sb.data)
