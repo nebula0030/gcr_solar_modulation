@@ -25,7 +25,17 @@ Example:
   --bin-length 3600 --export-csv
 ```
 
-This writes `<run>_overlay.html` and `<run>_sidebyside.html`.
+This writes a single combined `<run>.html` with an Overlay tab (active on
+load) and a Side-by-side tab, sharing one control bar (per-series checkboxes,
+theme, line style) that drives both figures — switching tabs just shows the
+other figure and resizes it, without a full page reload.
+
+Because `<run>.html` is written with the same name prefix as the input file
+(by default, alongside it), scripts that later glob the data directory for
+inputs should use a `.txt`-qualified pattern (`CW_*.txt`), not a bare `CW_*`,
+so the generated `.html` isn't swept up as if it were data. Alternatively,
+pass `--output-dir` to write all generated HTML somewhere separate from the
+inputs.
 
 On a real ~2.74-day run from this detector (747,823 events parsed, 111,538
 of them coincident, mean coincident rate ~0.47 Hz) with 1-hour bins, this
@@ -64,8 +74,8 @@ start three days after the first ends:
 
 The console reported one detector (`NebuLab_004`), listed both input
 files, 181 complete 1-hour bins spanning 2026-07-10 04:16 to 2026-07-17
-17:16 UTC, and wrote one `_overlay.html`/`_sidebyside.html` pair (the run
-name grows a `+1more` suffix once more than one file contributes). With
+17:16 UTC, and wrote one combined `<run>.html` (the run name grows a
+`+1more` suffix once more than one file contributes). With
 `--export-csv`, the gap between the files' coverage — 2026-07-12T22:16 to
 2026-07-14T23:16 in this run — showed up as 49 consecutive bins with
 `counts=0`, `livetime_s=0`, and `nan` rate/error/pressure/temperature
@@ -117,10 +127,11 @@ event count, bin count, and fitted/supplied correction. The two
 detectors overlap in absolute time (`AxLab_test` covers the first ~4.5
 hours of `NebuLab_004`'s 65-hour run) and that is allowed — the
 same-detector overlap check only applies within one detector's `Name`.
-The overlay page rendered one percent-deviation trace per detector (two
+The Overlay tab rendered one percent-deviation trace per detector (two
 distinct colors, confirmed by screenshot, one legend entry and checkbox
-each); the side-by-side page puts both detectors' traces in a single
-shared rate panel, with one additional panel per external source.
+each); the Side-by-side tab puts both detectors' traces in a single
+shared rate panel, with one additional panel per external source. Both
+tabs live in the same `<run>.html` and share the one control bar.
 Per-detector binned CSVs are exported with the detector name appended,
 e.g. `..._NebuLab_004_binned.csv` and `..._AxLab_test_binned.csv`. Gap
 shading only applies when there is exactly one detector — with two or
@@ -143,7 +154,8 @@ additive.
    and sunspot number for the run's window, cached locally.
 5. **Align.** Resamples everything onto the rate bins, flagging interpolated
    points.
-6. **Plot.** Emits both an overlay and a linked-axis side-by-side view.
+6. **Plot.** Emits one combined `<run>.html` with an Overlay tab and a
+   linked-axis Side-by-side tab, sharing one control bar.
 
 ## Choosing a bin length
 

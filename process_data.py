@@ -32,7 +32,8 @@ from external_sources import (
     fetch_sunspot,
 )
 from nmdb_stations import Station, StationError, rank_by_rigidity, select_station
-from plotting import DetectorSeries, PlotMetadata, build_overlay, build_side_by_side, write_html
+from plotting import (DetectorSeries, PlotMetadata, build_overlay,
+                      build_side_by_side, write_combined_html)
 from rate import RateError, RateSeries, compute_rate
 from splice import (SpliceError, group_by_detector, parse_end_overrides,
                     parse_start_overrides, read_events_multi)
@@ -668,18 +669,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         header_lines=header_lines,
     )
 
-    overlay_path = os.path.join(output_dir, run_name + "_overlay.html")
-    side_path = os.path.join(output_dir, run_name + "_sidebyside.html")
-    write_html(
+    combined_path = os.path.join(output_dir, run_name + ".html")
+    write_combined_html(
         build_overlay(detectors, aligned, meta, master_mid, gaps=gaps),
-        overlay_path,
-    )
-    write_html(
         build_side_by_side(detectors, aligned, meta, master_mid, gaps=gaps),
-        side_path, stacked=True,
+        combined_path,
     )
-    print("Wrote {0}".format(overlay_path))
-    print("Wrote {0}".format(side_path))
+    print("Wrote {0}".format(combined_path))
 
     if args.export_csv:
         if len(detectors) == 1:

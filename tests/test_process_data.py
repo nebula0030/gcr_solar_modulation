@@ -105,8 +105,23 @@ def test_offline_run_still_produces_both_plots(tmp_path):
     ])
     assert code == 0
     produced = sorted(p.name for p in tmp_path.glob("*.html"))
-    assert any(n.endswith("_overlay.html") for n in produced)
-    assert any(n.endswith("_sidebyside.html") for n in produced)
+    assert produced == ["sample_13col.html"]
+    assert not any("_overlay" in n or "_sidebyside" in n for n in produced)
+
+
+def test_writes_single_combined_html_not_separate_files(tmp_path):
+    path = os.path.join(FIXTURES, "sample_13col.txt")
+    code = main([path, "--bin-length", "2", "--sources", "",
+                 "--correction-method", "literature", "--beta-p", "-0.13",
+                 "--output-dir", str(tmp_path),
+                 "--cache-dir", str(tmp_path / "cache")])
+    assert code == 0
+    htmls = sorted(p.name for p in tmp_path.glob("*.html"))
+    # Exactly one combined file; no _overlay/_sidebyside split.
+    assert htmls == ["sample_13col.html"]
+    assert not any("_overlay" in n or "_sidebyside" in n for n in htmls)
+    content = (tmp_path / "sample_13col.html").read_text()
+    assert 'id="tab-overlay"' in content and 'id="tab-side"' in content
 
 
 def test_csv_export_writes_a_file(tmp_path):
@@ -316,8 +331,8 @@ def test_main_falls_back_and_reports_the_station_actually_used(
     assert "falling back from UFSZ to ZUGS" in footer
 
     produced = sorted(p.name for p in tmp_path.glob("*.html"))
-    assert any(n.endswith("_overlay.html") for n in produced)
-    assert any(n.endswith("_sidebyside.html") for n in produced)
+    assert produced == ["sample_13col.html"]
+    assert not any("_overlay" in n or "_sidebyside" in n for n in produced)
 
 
 def test_main_continues_offline_when_all_nmdb_candidates_fail(
@@ -351,8 +366,8 @@ def test_main_continues_offline_when_all_nmdb_candidates_fail(
     all_codes = {s.code for s in process_data.rank_by_rigidity(0.0)}
     assert set(calls) == all_codes
     produced = sorted(p.name for p in tmp_path.glob("*.html"))
-    assert any(n.endswith("_overlay.html") for n in produced)
-    assert any(n.endswith("_sidebyside.html") for n in produced)
+    assert produced == ["sample_13col.html"]
+    assert not any("_overlay" in n or "_sidebyside" in n for n in produced)
 
 
 def test_main_explicit_override_with_no_data_is_reported_not_replaced(
@@ -475,7 +490,9 @@ def test_end_time_truncates_and_still_writes_plots(tmp_path):
                      "--output-dir", str(out),
                      "--cache-dir", str(tmp_path / "cache")] + extra_args)
         assert code == 0
-        assert any(p.name.endswith("_overlay.html") for p in out.glob("*.html"))
+        produced = sorted(p.name for p in out.glob("*.html"))
+        assert produced == ["sample_13col.html"]
+        assert not any("_overlay" in n or "_sidebyside" in n for n in produced)
         csv_path = next(out.glob("*_binned.csv"))
         rows = csv_path.read_text().strip().splitlines()
         return len(rows) - 1  # minus the header row
@@ -506,13 +523,14 @@ def test_single_file_still_produces_both_plots(tmp_path):
                  "--cache-dir", str(tmp_path / "cache")])
     assert code == 0
     produced = sorted(p.name for p in tmp_path.glob("*.html"))
-    assert any(n.endswith("_overlay.html") for n in produced)
-    assert any(n.endswith("_sidebyside.html") for n in produced)
+    assert produced == ["sample_13col.html"]
+    assert not any("_overlay" in n or "_sidebyside" in n for n in produced)
 
 
 def test_two_different_detector_files_stack_on_one_page(tmp_path):
     """Two different detectors must run through the pipeline independently
-    and land on ONE stacked overlay/side-by-side page (not one per detector).
+    and land on ONE combined tabbed (overlay/side-by-side) page (not one per
+    detector).
     """
     path_a = os.path.join(FIXTURES, "sample_13col.txt")
     path_b = os.path.join(FIXTURES, "det_b.txt")
@@ -522,12 +540,10 @@ def test_two_different_detector_files_stack_on_one_page(tmp_path):
                  "--cache-dir", str(tmp_path / "cache")])
     assert code == 0
     produced = sorted(p.name for p in tmp_path.glob("*.html"))
-    overlays = [n for n in produced if n.endswith("_overlay.html")]
-    sides = [n for n in produced if n.endswith("_sidebyside.html")]
-    assert len(overlays) == 1
-    assert len(sides) == 1
+    assert len(produced) == 1
+    assert not any("_overlay" in n or "_sidebyside" in n for n in produced)
     # run_name derives from the first file's stem, with a "+Nmore" suffix.
-    assert overlays[0].startswith("sample_13col_+1more")
+    assert produced[0].startswith("sample_13col_+1more")
 
 
 def test_summary_mean_raw_rate_is_finite_when_a_bin_is_dead():
