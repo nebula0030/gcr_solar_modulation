@@ -119,3 +119,35 @@ def test_marginal_degenerate_returns_empty():
     m = anomaly.marginal_distribution(rate, np.array([3600.0, 3600.0]),
                                       np.array([1.0, 1.0]), 0.48)
     assert m["observed"] == [] and m["edges"] == [] and m["expected"] == []
+
+
+def test_marginal_expected_includes_top_edge_count():
+    # 3 bins, identical livetime/adj; the max rate maps exactly to an integer
+    # count (1010). Before the top-edge fix, that count's mass is dropped.
+    T = 3600.0
+    counts = np.array([1000.0, 1000.0, 1010.0])
+    livetime = np.full(3, T)
+    adj = np.ones(3)
+    rate = counts / livetime
+    mu = anomaly.baseline_mean(rate)
+    m = anomaly.marginal_distribution(rate, livetime, adj, mu)
+    lam = mu * T  # adj = 1, same for all three bins
+    # Reference: all three bins' mass over the inclusive count range [1000, 1010].
+    ref = 3.0 * (anomaly.poisson_cdf(1010, lam) - anomaly.poisson_cdf(999, lam))
+    assert sum(m["expected"]) == pytest.approx(ref, abs=1e-6)
+
+
+def test_marginal_handles_heterogeneous_livetime_and_adj():
+    rng = np.random.default_rng(3)
+    n = 150
+    livetime = rng.uniform(2400.0, 3600.0, size=n)   # varying dead time
+    adj = rng.uniform(0.97, 1.03, size=n)            # varying correction factor
+    true_rate = 0.5
+    counts = rng.poisson(true_rate * livetime / adj)
+    rate = adj * counts / livetime
+    mu = anomaly.baseline_mean(rate)
+    m = anomaly.marginal_distribution(rate, livetime, adj, mu)
+    assert sum(m["observed"]) == n
+    assert len(m["edges"]) == len(m["observed"]) + 1
+    assert 0.0 < sum(m["expected"]) <= n + 1e-6
+    assert all(e2 > e1 for e1, e2 in zip(m["edges"], m["edges"][1:]))

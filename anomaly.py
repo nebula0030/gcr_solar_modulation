@@ -172,11 +172,15 @@ def marginal_distribution(corrected_rate_hz, livetime_s, adj, mu) -> dict:
     lam = lambda_per_bin(mu, Tg, ag)  # per good bin
 
     expected = np.zeros(h, dtype=float)
+    last = h - 1
     for hbin in range(h):
         lo_rate, hi_rate = edges[hbin], edges[hbin + 1]
         for i in range(rg.size):
             l_k = math.ceil(lo_rate * Tg[i] / ag[i])
-            u_k = math.ceil(hi_rate * Tg[i] / ag[i]) - 1
+            if hbin == last:
+                u_k = int(math.floor(hi_rate * Tg[i] / ag[i] + 1e-9))
+            else:
+                u_k = math.ceil(hi_rate * Tg[i] / ag[i]) - 1
             if u_k < l_k:
                 continue
             expected[hbin] += poisson_cdf(u_k, lam[i]) - poisson_cdf(l_k - 1, lam[i])
