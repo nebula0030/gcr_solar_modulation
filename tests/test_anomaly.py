@@ -62,3 +62,25 @@ def test_threshold_rates_and_flags():
     counts = np.array([1050, 1200])  # in-band, above-band
     flags = anomaly.flag_bins(counts, k_lo, k_hi)
     assert flags.tolist() == [False, True]
+
+
+def test_flag_bins_lower_tail():
+    counts = np.array([950, 1050])
+    k_lo = np.array([1000, 1000])
+    k_hi = np.array([1100, 1100])
+    assert anomaly.flag_bins(counts, k_lo, k_hi).tolist() == [True, False]
+
+
+def test_poisson_cdf_converges_at_large_lambda():
+    lam = 43200.0
+    assert anomaly.poisson_cdf(int(lam), lam) == pytest.approx(0.5, abs=0.01)
+    # and thresholds are a sensible band around the mean
+    k_lo, k_hi = anomaly.threshold_counts(lam, 0.05)
+    assert k_lo < lam < k_hi
+
+
+def test_threshold_counts_rejects_nonfinite_or_nonpositive_lambda():
+    import math as _m
+    for bad in (float("nan"), float("inf"), -5.0, 0.0):
+        with pytest.raises(ValueError):
+            anomaly.threshold_counts(bad, 0.05)

@@ -7,9 +7,10 @@ incomplete gamma, so it is O(iterations) rather than O(k) even at the
 from __future__ import annotations
 
 import math
+from typing import Tuple
+
 import numpy as np
 
-_ITMAX = 300
 _EPS = 3.0e-14
 _FPMIN = 1.0e-300
 
@@ -21,12 +22,15 @@ def _gser(a: float, x: float) -> float:
     ap = a
     total = 1.0 / a
     delta = total
-    for _ in range(_ITMAX):
+    itmax = max(1000, int(4.0 * (a + x)))
+    for _ in range(itmax):
         ap += 1.0
         delta *= x / ap
         total += delta
         if abs(delta) < abs(total) * _EPS:
             break
+    else:
+        raise ValueError("_gser failed to converge")
     return total * math.exp(-x + a * math.log(x) - math.lgamma(a))
 
 
@@ -36,7 +40,8 @@ def _gcf(a: float, x: float) -> float:
     c = 1.0 / _FPMIN
     d = 1.0 / b
     h = d
-    for i in range(1, _ITMAX):
+    itmax = max(1000, int(4.0 * (a + x)))
+    for i in range(1, itmax):
         an = -i * (i - a)
         b += 2.0
         d = an * d + b
@@ -50,6 +55,8 @@ def _gcf(a: float, x: float) -> float:
         h *= delta
         if abs(delta - 1.0) < _EPS:
             break
+    else:
+        raise ValueError("_gcf failed to converge")
     return math.exp(-x + a * math.log(x) - math.lgamma(a)) * h
 
 
@@ -82,10 +89,12 @@ def lambda_per_bin(mu: float, livetime_s: np.ndarray, adj: np.ndarray) -> np.nda
     return mu * np.asarray(livetime_s, dtype=float) / np.asarray(adj, dtype=float)
 
 
-def threshold_counts(lam: float, p: float) -> tuple:
+def threshold_counts(lam: float, p: float) -> Tuple[int, int]:
     """Two-sided exact-Poisson critical counts (k_lo, k_hi) at total tail p."""
     if not (0.0 < p < 1.0):
         raise ValueError("p must be in (0, 1)")
+    if not math.isfinite(lam) or lam <= 0.0:
+        raise ValueError("lam must be finite and > 0")
     half = p / 2.0
     spread = int(10.0 * math.sqrt(lam)) + 10
     hi_bound = int(lam) + spread
