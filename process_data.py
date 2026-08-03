@@ -32,8 +32,8 @@ from external_sources import (
     fetch_sunspot,
 )
 from nmdb_stations import Station, StationError, rank_by_rigidity, select_station
-from plotting import (DetectorSeries, PlotMetadata, build_overlay,
-                      build_side_by_side, write_combined_html)
+from plotting import (DetectorSeries, PlotMetadata, build_anomaly_payload,
+                      build_overlay, build_side_by_side, write_combined_html)
 from rate import RateError, RateSeries, compute_rate
 from splice import (SpliceError, group_by_detector, parse_end_overrides,
                     parse_start_overrides, read_events_multi)
@@ -670,10 +670,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
 
     combined_path = os.path.join(output_dir, run_name + ".html")
+    anomaly_payload = build_anomaly_payload(detectors)
     write_combined_html(
         build_overlay(detectors, aligned, meta, master_mid, gaps=gaps),
         build_side_by_side(detectors, aligned, meta, master_mid, gaps=gaps),
-        combined_path,
+        combined_path, anomaly=anomaly_payload,
     )
     print("Wrote {0}".format(combined_path))
 

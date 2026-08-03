@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import json
+
 import numpy as np
 import pytest
 
+import anomaly
+import plotting
 from align import AlignedSeries
 from correction import CorrectionResult
 from plotting import (
@@ -272,7 +276,9 @@ def test_side_by_side_single_rate_panel_holds_all_detectors():
     master_utc = dets[0].rs.bin_mid_utc
     fig = build_side_by_side(dets, aligned, meta, master_utc)
     # rate panel (row 1) has both detector traces; then 1 external panel.
-    rate_traces = [t for t in fig.data if (t.name or "").startswith("Det")]
+    # (Match the "(corrected)" suffix, not a bare "Det" prefix -- the hidden
+    # per-detector anomaly traces are also named "DetA mean" etc.)
+    rate_traces = [t for t in fig.data if (t.name or "").endswith("(corrected)")]
     assert len(rate_traces) == 2
 
 
@@ -352,10 +358,13 @@ def test_figure_config_shapes_for_overlay_and_side():
     sb_cfg = _figure_config(sb, stacked=True)
 
     # Overlay: not stacked, one detector, secondary axis, all traces "row 1".
+    # rowOfTrace covers only the primary traces (1 detector + 2 external);
+    # the hidden per-detector anomaly traces appended after them are excluded.
     assert ov_cfg["stacked"] is False
     assert ov_cfg["nDetectors"] == 1
     assert ov_cfg["hasSecondaryAxis"] is True
-    assert ov_cfg["rowOfTrace"] == [1] * len(ov.data)
+    n_primary = len(dets) + len(aligned)
+    assert ov_cfg["rowOfTrace"] == [1] * n_primary
 
     # Side-by-side: stacked, rate panel + external panels, rowOfTrace maps all
     # detectors to row 1 then externals to 2..; nRows = 1 + n_external.
@@ -414,3 +423,88 @@ def test_combined_inlines_plotly_once(tmp_path):
     # ...but the ~4-5 MB library bundle is inlined only once (with the overlay);
     # inlining it twice would push the file past ~8 MB.
     assert len(content) < 8_000_000
+
+
+# --- exact-Poisson anomaly traces + shared payload -------------------------
+
+
+def test_build_anomaly_payload_shape_and_units():
+    rs, corr, aligned, meta = make_inputs()
+    dets = [DetectorSeries("Muon rate", rs, corr)]
+    payload = plotting.build_anomaly_payload(dets)
+    assert len(payload) == len(dets)
+    p0 = payload[0]
+    assert {"name", "mu", "t", "counts", "livetime", "adj", "rate",
+            "good"}.issubset(p0)
+    assert p0["mu"] == pytest.approx(
+        anomaly.baseline_mean(dets[0].correction.corrected_rate_hz))
+    assert len(p0["t"]) == len(p0["counts"]) == len(p0["rate"])
+    json.dumps(payload)  # must be JSON-able
+
+
+def test_overlay_appends_four_hidden_anomaly_traces_per_detector():
+    rs, corr, aligned, meta = make_inputs()
+    dets = [DetectorSeries("Muon rate", rs, corr)]
+    fig = build_overlay(dets, aligned, meta, rs.bin_mid_utc)
+    roles = [t.meta.get("anomaly") for t in fig.data
+             if isinstance(t.meta, dict) and "anomaly" in t.meta]
+    assert roles == ["mean", "lower", "upper", "outlier"]  # one detector
+    for t in fig.data:
+        if isinstance(t.meta, dict) and "anomaly" in t.meta:
+            assert t.visible is False
+
+
+def test_side_by_side_anomaly_mean_is_mu_in_hz():
+    rs, corr, aligned, meta = make_inputs()
+    dets = [DetectorSeries("Muon rate", rs, corr)]
+    mu = anomaly.baseline_mean(dets[0].correction.corrected_rate_hz)
+    fig = build_side_by_side(dets, aligned, meta, rs.bin_mid_utc)
+    mean_trace = next(t for t in fig.data
+                      if isinstance(t.meta, dict)
+                      and t.meta.get("anomaly") == "mean")
+    assert float(mean_trace.y[0]) == pytest.approx(mu)
+
+
+def test_overlay_anomaly_mean_is_zero_percent():
+    rs, corr, aligned, meta = make_inputs()
+    dets = [DetectorSeries("Muon rate", rs, corr)]
+    fig = build_overlay(dets, aligned, meta, rs.bin_mid_utc)
+    mean_trace = next(t for t in fig.data
+                      if isinstance(t.meta, dict)
+                      and t.meta.get("anomaly") == "mean")
+    assert float(mean_trace.y[0]) == pytest.approx(0.0)
+
+
+def test_figure_config_reports_units_and_anomaly_indices():
+    rs, corr, aligned, meta = make_inputs()
+    dets = [DetectorSeries("Muon rate", rs, corr)]
+    fig = build_overlay(dets, aligned, meta, rs.bin_mid_utc)
+    cfg = plotting._figure_config(fig, stacked=False)
+    assert cfg["units"] == "pct"
+    assert len(cfg["anomalyByDetector"]) == len(dets)
+    idx = cfg["anomalyByDetector"][0]
+    assert set(idx) == {"mean", "lower", "upper", "outlier"}
+    # existing role bookkeeping unchanged
+    assert cfg["nDetectors"] == len(dets)
+
+
+def test_side_by_side_units_are_hz():
+    rs, corr, aligned, meta = make_inputs()
+    dets = [DetectorSeries("Muon rate", rs, corr)]
+    fig = build_side_by_side(dets, aligned, meta, rs.bin_mid_utc)
+    cfg = plotting._figure_config(fig, stacked=True)
+    assert cfg["units"] == "hz"
+
+
+def test_existing_controls_unaffected_by_anomaly_traces():
+    """Appended anomaly traces must not disturb the pre-existing side-by-side
+    row map / row count / detector count used by the checkbox JS."""
+    rs, corr, aligned, meta = make_inputs()
+    dets = [DetectorSeries("Muon rate", rs, corr)]
+    fig = build_side_by_side(dets, aligned, meta, rs.bin_mid_utc)
+    cfg = plotting._figure_config(fig, stacked=True)
+    # nDetectors counts only the real detector rate traces, not anomaly traces
+    assert cfg["nDetectors"] == len(dets)
+    assert cfg["nRows"] == 1 + len(aligned)
+    n_primary = 1 + len(aligned)
+    assert len(cfg["rowOfTrace"]) == n_primary

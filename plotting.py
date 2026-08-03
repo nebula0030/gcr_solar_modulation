@@ -30,6 +30,7 @@ import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
+import anomaly
 from align import AlignedSeries
 from correction import CorrectionResult
 from rate import RateSeries
@@ -52,6 +53,9 @@ _SERIES_COLORS = (
 
 #: dataviz categorical palette, slot 1 (blue) -- the muon rate's fixed colour.
 _MUON_COLOR = "#2a78d6"
+
+#: Flagged-outlier marker colour (theme-adjusted in a later task).
+_ALERT_COLOR = "#c0392b"
 
 #: Fixed colour order: detector 0 anchors on blue (today's muon-rate colour),
 #: then every subsequent detector and every external series draw from the
@@ -246,6 +250,101 @@ def _add_gap_bands(fig: go.Figure, gaps, per_row: int = 1) -> None:
     )
 
 
+def build_anomaly_payload(detectors: List[DetectorSeries]) -> List[dict]:
+    """Per-detector JSON-able payload for client-side anomaly re-thresholding.
+
+    Hz units throughout. ``adj_i = corrected_rate_hz / rate_hz`` (the net
+    meteorological correction factor applied to bin i), falling back to 1.0
+    where the raw rate is zero or non-finite. Non-finite rates serialize as
+    ``None`` so the payload survives ``json.dumps`` untouched.
+    """
+    out = []
+    for det in detectors:
+        corrected = np.asarray(det.correction.corrected_rate_hz, dtype=float)
+        raw = np.asarray(det.rs.rate_hz, dtype=float)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            adj = np.where((raw != 0) & np.isfinite(raw), corrected / raw, 1.0)
+        mu = anomaly.baseline_mean(corrected)
+        t = [str(np.datetime64(x, "us")) for x in det.rs.bin_mid_utc]
+        rate = [None if not np.isfinite(v) else float(v) for v in corrected]
+        good = [bool(np.isfinite(v)) for v in corrected]
+        out.append({
+            "name": det.name,
+            "mu": (None if not np.isfinite(mu) else float(mu)),
+            "t": t,
+            "counts": [int(c) for c in det.rs.counts],
+            "livetime": [float(x) for x in det.rs.livetime_s],
+            "adj": [float(x) for x in adj],
+            "rate": rate,
+            "good": good,
+        })
+    return out
+
+
+def _anomaly_traces_for_detector(det: DetectorSeries, d_index: int, color: str,
+                                 units: str, mu: float) -> List[go.Scatter]:
+    """Four tagged hidden Scatter traces (mean, lower, upper, outlier).
+
+    Default two-sided exact-Poisson thresholds at p=0.05. ``units`` selects
+    the view: ``"pct"`` renders percent deviation from the run mean (overlay),
+    ``"hz"`` renders native Hz (side-by-side).
+    """
+    x = det.rs.bin_mid_utc
+    corrected = np.asarray(det.correction.corrected_rate_hz, dtype=float)
+    raw = np.asarray(det.rs.rate_hz, dtype=float)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        adj = np.where((raw != 0) & np.isfinite(raw), corrected / raw, 1.0)
+    T = np.asarray(det.rs.livetime_s, dtype=float)
+    counts = np.asarray(det.rs.counts)
+
+    def to_view(v):  # Hz value -> view units
+        if units == "pct":
+            return 100.0 * (v - mu) / mu
+        return v
+
+    lower = np.full(corrected.shape, np.nan)
+    upper = np.full(corrected.shape, np.nan)
+    k_lo = np.full(corrected.shape, -1)
+    k_hi = np.full(corrected.shape, np.iinfo(np.int64).max)
+    goodmask = np.isfinite(corrected) & np.isfinite(T) & (T > 0)
+    for i in np.where(goodmask)[0]:
+        lam_i = anomaly.lambda_per_bin(mu, T[i], adj[i])
+        klo, khi = anomaly.threshold_counts(float(lam_i), 0.05)
+        k_lo[i], k_hi[i] = klo, khi
+        lower[i] = to_view(adj[i] * klo / T[i])
+        upper[i] = to_view(adj[i] * khi / T[i])
+    flags = anomaly.flag_bins(counts, k_lo, k_hi) & goodmask
+
+    mean_y = to_view(mu)
+    x0, x1 = x[0], x[-1]
+
+    def trace_meta(role):
+        return {"anomaly": role, "det": d_index}
+
+    return [
+        go.Scatter(x=[x0, x1], y=[mean_y, mean_y], mode="lines",
+                  line=dict(color=color, width=3), visible=False,
+                  name="{0} mean".format(det.name), meta=trace_meta("mean"),
+                  hoverinfo="skip", showlegend=False),
+        go.Scatter(x=x, y=lower, mode="lines",
+                  line=dict(color=color, width=1, dash="dash"), visible=False,
+                  name="{0} lower".format(det.name), meta=trace_meta("lower"),
+                  hoverinfo="skip", showlegend=False),
+        go.Scatter(x=x, y=upper, mode="lines",
+                  line=dict(color=color, width=1, dash="dash"), visible=False,
+                  name="{0} upper".format(det.name), meta=trace_meta("upper"),
+                  hoverinfo="skip", showlegend=False),
+        go.Scatter(x=[x[i] for i in np.where(flags)[0]],
+                  y=[to_view(corrected[i]) for i in np.where(flags)[0]],
+                  mode="markers",
+                  marker=dict(color=_ALERT_COLOR, size=13, symbol="circle-open",
+                              line=dict(width=2)),
+                  visible=False, name="{0} flagged".format(det.name),
+                  meta=trace_meta("outlier"), showlegend=False,
+                  hovertemplate="flagged: %{x}<extra></extra>"),
+    ]
+
+
 def build_overlay(
     detectors: List[DetectorSeries],
     aligned: List[AlignedSeries],
@@ -292,6 +391,12 @@ def build_overlay(
                 text=_hover_text(series),
                 hovertemplate="%{text}<extra></extra>",
             ))
+
+    for d_index, det in enumerate(detectors):
+        mu = float(np.nanmean(det.correction.corrected_rate_hz))
+        for tr in _anomaly_traces_for_detector(det, d_index,
+                                               _detector_color(d_index), "pct", mu):
+            fig.add_trace(tr)
 
     fig.update_layout(
         xaxis=dict(title="Time (UTC)", gridcolor=_GRIDLINE_COLOR,
@@ -347,6 +452,12 @@ def build_side_by_side(
         ), row=e_index + 2, col=1)
         if log_scale:
             fig.update_yaxes(type="log", row=e_index + 2, col=1)
+
+    for d_index, det in enumerate(detectors):
+        mu = float(np.nanmean(det.correction.corrected_rate_hz))
+        for tr in _anomaly_traces_for_detector(det, d_index,
+                                               _detector_color(d_index), "hz", mu):
+            fig.add_trace(tr, row=1, col=1)
 
     fig.update_xaxes(title_text="Time (UTC)", row=n_rows, col=1)
     fig.update_xaxes(matches="x", gridcolor=_GRIDLINE_COLOR, linecolor=_MUTED_INK)
@@ -833,18 +944,31 @@ def _figure_config(fig: go.Figure, stacked: bool) -> dict:
     """Per-figure config consumed by the page JS (colours, row map, margins,
     axis/annotation metadata). Shared by write_html and write_combined_html."""
     light, dark = _trace_colors(fig)
+
+    def _is_anomaly(t):
+        return isinstance(t.meta, dict) and "anomaly" in t.meta
+
+    n_primary = sum(1 for t in fig.data if not _is_anomaly(t))
     n_detectors = sum(1 for t in fig.data
                       if (t.name or "").endswith("(corrected)"))
     if stacked:
         row_of_trace = [1] * n_detectors + list(
-            range(2, len(fig.data) - n_detectors + 2))
+            range(2, n_primary - n_detectors + 2))
     else:
-        row_of_trace = [1] * len(fig.data)
-    n_rows = (1 + (len(fig.data) - n_detectors)) if stacked else 1
+        row_of_trace = [1] * n_primary
+    n_rows = (1 + (n_primary - n_detectors)) if stacked else 1
     annotation_roles = [
         "muted" if (ann.name == "gap-label" or ann.text == "no data") else "subplot"
         for ann in fig.layout.annotations
     ]
+
+    units = "hz" if stacked else "pct"
+    anomaly_by_det = {}
+    for idx, t in enumerate(fig.data):
+        m = t.meta if isinstance(t.meta, dict) else {}
+        if "anomaly" in m:
+            anomaly_by_det.setdefault(m["det"], {})[m["anomaly"]] = idx
+
     return {
         "traceColors": {"light": light, "dark": dark},
         "stacked": stacked,
@@ -859,6 +983,8 @@ def _figure_config(fig: go.Figure, stacked: bool) -> dict:
         "muonTrace": 0,
         "hasSecondaryAxis": not stacked,
         "annotationRoles": annotation_roles,
+        "units": units,
+        "anomalyByDetector": [anomaly_by_det[d] for d in sorted(anomaly_by_det)],
     }
 
 
@@ -923,7 +1049,8 @@ def write_html(fig: go.Figure, path: str, stacked: bool = False) -> None:
 
 
 def write_combined_html(
-    overlay_fig: go.Figure, side_fig: go.Figure, path: str
+    overlay_fig: go.Figure, side_fig: go.Figure, path: str,
+    anomaly: Optional[List[dict]] = None,
 ) -> None:
     """Write one self-contained page hosting both figures in tabs.
 
@@ -932,6 +1059,11 @@ def write_combined_html(
     toggles that series in both views (and collapses the side-by-side panel),
     the theme toggle recolours both, and the line-spec restyles the detector
     traces in both. Switching tabs resizes the newly-shown figure.
+
+    ``anomaly`` is the ``build_anomaly_payload`` output (one dict per
+    detector); it is embedded verbatim as ``CFG.detectorsAnomaly`` for the
+    page JS to consume (client-side re-thresholding is wired in a later
+    task). ``None`` embeds as an empty list.
     """
     names = [t.name or "Series {0}".format(i + 1)
              for i, t in enumerate(overlay_fig.data)]
@@ -950,6 +1082,7 @@ def write_combined_html(
             for key, _label, mode, dash, size in _LINE_SPECS
         },
         "views": {"overlay": ov_cfg, "side": sb_cfg},
+        "detectorsAnomaly": anomaly or [],
     }
 
     checkboxes = "".join(
