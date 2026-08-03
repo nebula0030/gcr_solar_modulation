@@ -453,9 +453,12 @@ def test_overlay_appends_four_hidden_anomaly_traces_per_detector():
     rs, corr, aligned, meta = make_inputs()
     dets = [DetectorSeries("Muon rate", rs, corr)]
     fig = build_overlay(dets, aligned, meta, rs.bin_mid_utc)
+    # the four anomaly-band roles (the marginal hist/poisson traces are also
+    # meta.anomaly-tagged and are exercised separately)
+    band_roles = ("mean", "lower", "upper", "outlier")
     roles = [t.meta.get("anomaly") for t in fig.data
-             if isinstance(t.meta, dict) and "anomaly" in t.meta]
-    assert roles == ["mean", "lower", "upper", "outlier"]  # one detector
+             if isinstance(t.meta, dict) and t.meta.get("anomaly") in band_roles]
+    assert roles == list(band_roles)  # one detector
     for t in fig.data:
         if isinstance(t.meta, dict) and "anomaly" in t.meta:
             assert t.visible is False
@@ -659,6 +662,88 @@ def test_series_visibility_restyle_targets_primary_trace_indices_only():
     assert unqualified == [], unqualified
 
 
+# --- y-axis marginal: observed histogram + exact-Poisson overlay ----------
+
+
+def test_payload_has_marginal():
+    det = make_detector("DetA")
+    payload = plotting.build_anomaly_payload([det])
+    m = payload[0]["marginal"]
+    assert set(m) == {"edges", "observed", "expected"}
+    assert len(m["edges"]) == len(m["observed"]) + 1
+    json.dumps(payload)  # still JSON-able with the marginal embedded
+
+
+def test_overlay_has_marginal_axis_and_traces():
+    rs, corr, aligned, meta = make_inputs()
+    dets = [DetectorSeries("Muon rate", rs, corr)]
+    fig = build_overlay(dets, aligned, meta, rs.bin_mid_utc)
+    # main x-axis domain shrank to leave the right margin for the marginal
+    assert fig.layout.xaxis.domain[1] == pytest.approx(0.82, abs=1e-6)
+    # a dedicated marginal x-axis occupies the right strip, sharing y
+    assert fig.layout.xaxis3.domain[0] == pytest.approx(0.85, abs=1e-6)
+    assert fig.layout.xaxis3.domain[1] == pytest.approx(1.0, abs=1e-6)
+    assert fig.layout.xaxis3.anchor == "y"
+    roles = [t.meta.get("anomaly") for t in fig.data
+             if isinstance(t.meta, dict) and t.meta.get("anomaly") in ("hist", "poisson")]
+    assert roles == ["hist", "poisson"]  # one detector
+    for t in fig.data:
+        if isinstance(t.meta, dict) and t.meta.get("anomaly") in ("hist", "poisson"):
+            assert t.visible is False
+            assert t.xaxis == "x3" and t.yaxis == "y"
+    cfg = plotting._figure_config(fig, stacked=False)
+    assert len(cfg["marginalByDetector"]) == len(dets)
+    idx = cfg["marginalByDetector"][0]
+    assert set(idx) == {"hist", "poisson"}
+    for role, i in idx.items():
+        assert fig.data[i].meta["anomaly"] == role
+
+
+def test_side_by_side_rows_share_shrunk_domain():
+    rs, corr, aligned, meta = make_inputs()
+    dets = [DetectorSeries("Muon rate", rs, corr)]
+    fig = build_side_by_side(dets, aligned, meta, rs.bin_mid_utc)
+    # every stacked time panel keeps the same shrunk x-domain (zoom-synced)
+    assert fig.layout.xaxis.domain[1] == pytest.approx(0.82, abs=1e-6)
+    assert fig.layout.xaxis2.domain[1] == pytest.approx(0.82, abs=1e-6)
+    # marginal x-axis anchored to row-1 y, own independent range (no matches)
+    marg = getattr(fig.layout, "xaxis4")
+    assert marg.domain[0] == pytest.approx(0.85, abs=1e-6)
+    assert marg.domain[1] == pytest.approx(1.0, abs=1e-6)
+    assert marg.anchor == "y"
+    assert marg.matches is None
+    roles = [t.meta.get("anomaly") for t in fig.data
+             if isinstance(t.meta, dict) and t.meta.get("anomaly") in ("hist", "poisson")]
+    assert roles == ["hist", "poisson"]
+    for t in fig.data:
+        if isinstance(t.meta, dict) and t.meta.get("anomaly") in ("hist", "poisson"):
+            assert t.xaxis == "x4" and t.yaxis == "y"
+
+
+def test_marginal_traces_do_not_change_row_bookkeeping():
+    """Adding the two marginal traces per detector must not shift nRows,
+    rowOfTrace, or nDetectors (they are meta.anomaly-tagged, hence excluded)."""
+    rs, corr, aligned, meta = make_inputs()
+    dets = [DetectorSeries("Muon rate", rs, corr)]
+    fig = build_side_by_side(dets, aligned, meta, rs.bin_mid_utc)
+    cfg = plotting._figure_config(fig, stacked=True)
+    assert cfg["nDetectors"] == len(dets)
+    assert cfg["nRows"] == 1 + len(aligned)
+    assert len(cfg["rowOfTrace"]) == len(dets) + len(aligned)
+
+
+def test_side_by_side_marginal_y_is_hz():
+    rs, corr, aligned, meta = make_inputs()
+    dets = [DetectorSeries("Muon rate", rs, corr)]
+    mu = anomaly.baseline_mean(dets[0].correction.corrected_rate_hz)
+    fig = build_side_by_side(dets, aligned, meta, rs.bin_mid_utc)
+    hist = next(t for t in fig.data if isinstance(t.meta, dict)
+                and t.meta.get("anomaly") == "hist")
+    # bucket midpoints are native Hz, so they bracket the run mean rate
+    ys = [float(v) for v in hist.y]
+    assert min(ys) <= mu <= max(ys)
+
+
 def test_headless_toggle_leaves_anomaly_traces_hidden(tmp_path):
     """Runtime regression test for the restyle-index leak: load the combined
     page in headless Chrome, toggle an unrelated (external-series) checkbox
@@ -733,7 +818,8 @@ def test_headless_toggle_leaves_anomaly_traces_hidden(tmp_path):
         f"(chrome rc={result.returncode}, stderr={result.stderr[-2000:]})"
     )
     lines = [ln for ln in m.group(1).splitlines() if ln.strip()]
-    assert len(lines) == 2 * 4, f"expected 8 anomaly-trace rows, got: {lines}"
+    # 6 meta.anomaly traces per view (4 anomaly-band + 2 marginal), 2 views.
+    assert len(lines) == 2 * 6, f"expected 12 anomaly-trace rows, got: {lines}"
     for line in lines:
         assert line.endswith(":false"), (
             f"anomaly trace leaked visible after unrelated toggle: {line}"

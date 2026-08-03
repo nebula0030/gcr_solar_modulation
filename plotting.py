@@ -268,6 +268,8 @@ def build_anomaly_payload(detectors: List[DetectorSeries]) -> List[dict]:
         t = [str(np.datetime64(x, "us")) for x in det.rs.bin_mid_utc]
         rate = [None if not np.isfinite(v) else float(v) for v in corrected]
         good = [bool(np.isfinite(v)) for v in corrected]
+        marginal = anomaly.marginal_distribution(
+            corrected, det.rs.livetime_s, adj, mu)
         out.append({
             "name": det.name,
             "mu": (None if not np.isfinite(mu) else float(mu)),
@@ -277,6 +279,7 @@ def build_anomaly_payload(detectors: List[DetectorSeries]) -> List[dict]:
             "adj": [float(x) for x in adj],
             "rate": rate,
             "good": good,
+            "marginal": marginal,
         })
     return out
 
@@ -347,6 +350,55 @@ def _anomaly_traces_for_detector(det: DetectorSeries, d_index: int, color: str,
     ]
 
 
+#: Poisson-overlay ink for the y-axis marginal (theme-adjusted in a later task).
+_MARGINAL_LINE = _SECONDARY_INK
+
+
+def _detector_adj(det: DetectorSeries) -> np.ndarray:
+    """Net meteorological correction factor per bin (corrected/raw, 1.0 fallback)."""
+    corrected = np.asarray(det.correction.corrected_rate_hz, dtype=float)
+    raw = np.asarray(det.rs.rate_hz, dtype=float)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        return np.where((raw != 0) & np.isfinite(raw), corrected / raw, 1.0)
+
+
+def _marginal_traces_for_detector(det: DetectorSeries, d_index: int, color: str,
+                                  units: str, mu: float, xaxis_id: str) -> list:
+    """Two tagged hidden traces for the y-axis marginal: a rotated observed-rate
+    histogram (``go.Bar`` orientation="h") plus an exact-Poisson expected
+    overlay (``go.Scatter`` line), both plotted against the muon-rate y-axis on
+    a right-margin x-axis. Bucket midpoints are converted to the view units:
+    ``"pct"`` -> percent deviation from the run mean (overlay), ``"hz"`` ->
+    native Hz (side-by-side)."""
+    adj = _detector_adj(det)
+    m = anomaly.marginal_distribution(
+        det.correction.corrected_rate_hz, det.rs.livetime_s, adj, mu)
+    edges = np.asarray(m["edges"], dtype=float)
+    observed = m["observed"]
+    expected = m["expected"]
+    if edges.size >= 2:
+        mids = (edges[:-1] + edges[1:]) / 2.0
+        mids_view = ((100.0 * (mids - mu) / mu) if units == "pct" else mids).tolist()
+    else:
+        mids_view = []
+
+    def trace_meta(role):
+        return {"anomaly": role, "det": d_index}
+
+    return [
+        go.Bar(orientation="h", y=mids_view, x=observed,
+               marker=dict(color=color, opacity=0.45),
+               xaxis=xaxis_id, yaxis="y", visible=False,
+               name="{0} observed".format(det.name), meta=trace_meta("hist"),
+               hoverinfo="skip", showlegend=False),
+        go.Scatter(mode="lines", y=mids_view, x=expected,
+                   line=dict(color=_MARGINAL_LINE, width=2),
+                   xaxis=xaxis_id, yaxis="y", visible=False,
+                   name="{0} poisson".format(det.name), meta=trace_meta("poisson"),
+                   hoverinfo="skip", showlegend=False),
+    ]
+
+
 def build_overlay(
     detectors: List[DetectorSeries],
     aligned: List[AlignedSeries],
@@ -400,13 +452,21 @@ def build_overlay(
                                                _detector_color(d_index), "pct", mu):
             fig.add_trace(tr)
 
+    for d_index, det in enumerate(detectors):
+        mu = float(np.nanmean(det.correction.corrected_rate_hz))
+        for tr in _marginal_traces_for_detector(
+                det, d_index, _detector_color(d_index), "pct", mu, "x3"):
+            fig.add_trace(tr)
+
     fig.update_layout(
         xaxis=dict(title="Time (UTC)", gridcolor=_GRIDLINE_COLOR,
-                   linecolor=_MUTED_INK),
+                   linecolor=_MUTED_INK, domain=[0.0, 0.82]),
         yaxis=dict(title="Deviation from run mean (%)",
                    gridcolor=_GRIDLINE_COLOR, linecolor=_MUTED_INK),
         yaxis2=dict(title="Other indices (native units)", overlaying="y",
                     side="right", showgrid=False, linecolor=_MUTED_INK),
+        xaxis3=dict(domain=[0.85, 1.0], anchor="y", title="bins",
+                    showgrid=False, linecolor=_MUTED_INK),
         legend=dict(orientation="h", yanchor="top", y=-0.14, x=0),
     )
     _add_gap_bands(fig, gaps)
@@ -461,9 +521,27 @@ def build_side_by_side(
                                                _detector_color(d_index), "hz", mu):
             fig.add_trace(tr, row=1, col=1)
 
+    # Marginal traces share row-1's rate y-axis but ride a dedicated right-margin
+    # x-axis (added AFTER the bulk update_xaxes below so its independent range /
+    # domain survive the matches="x" + domain=[0,0.82] sweep over the time axes).
+    marg_ref = "x{0}".format(n_rows + 1)
+    for d_index, det in enumerate(detectors):
+        mu = float(np.nanmean(det.correction.corrected_rate_hz))
+        for tr in _marginal_traces_for_detector(
+                det, d_index, _detector_color(d_index), "hz", mu, marg_ref):
+            fig.add_trace(tr)
+
     fig.update_xaxes(title_text="Time (UTC)", row=n_rows, col=1)
     fig.update_xaxes(matches="x", gridcolor=_GRIDLINE_COLOR, linecolor=_MUTED_INK)
+    # Shrink every stacked time panel to the same left strip so they stay
+    # vertically aligned and zoom-synced with the marginal parked at the right.
+    fig.update_xaxes(domain=[0.0, 0.82])
     fig.update_yaxes(gridcolor=_GRIDLINE_COLOR, linecolor=_MUTED_INK)
+    fig.update_layout(**{
+        "xaxis{0}".format(n_rows + 1): dict(
+            domain=[0.85, 1.0], anchor="y", title="bins", showgrid=False,
+            linecolor=_MUTED_INK),
+    })
     fig.update_layout(showlegend=False)
     _add_gap_bands(fig, gaps, per_row=n_rows)
     _apply_common_layout(fig, meta,
@@ -971,10 +1049,14 @@ def _figure_config(fig: go.Figure, stacked: bool) -> dict:
 
     units = "hz" if stacked else "pct"
     anomaly_by_det = {}
+    marginal_by_det = {}
     for idx, t in enumerate(fig.data):
         m = t.meta if isinstance(t.meta, dict) else {}
-        if "anomaly" in m:
-            anomaly_by_det.setdefault(m["det"], {})[m["anomaly"]] = idx
+        role = m.get("anomaly")
+        if role in ("mean", "lower", "upper", "outlier"):
+            anomaly_by_det.setdefault(m["det"], {})[role] = idx
+        elif role in ("hist", "poisson"):
+            marginal_by_det.setdefault(m["det"], {})[role] = idx
 
     return {
         "traceColors": {"light": light, "dark": dark},
@@ -992,6 +1074,7 @@ def _figure_config(fig: go.Figure, stacked: bool) -> dict:
         "annotationRoles": annotation_roles,
         "units": units,
         "anomalyByDetector": [anomaly_by_det[d] for d in sorted(anomaly_by_det)],
+        "marginalByDetector": [marginal_by_det[d] for d in sorted(marginal_by_det)],
     }
 
 
