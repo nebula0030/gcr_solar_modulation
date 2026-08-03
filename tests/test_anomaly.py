@@ -84,3 +84,38 @@ def test_threshold_counts_rejects_nonfinite_or_nonpositive_lambda():
     for bad in (float("nan"), float("inf"), -5.0, 0.0):
         with pytest.raises(ValueError):
             anomaly.threshold_counts(bad, 0.05)
+
+
+def _synthetic(n=200, lam=1000.0, T=3600.0, seed=0):
+    rng = np.random.default_rng(seed)
+    counts = rng.poisson(lam, size=n).astype(float)
+    livetime = np.full(n, T)
+    adj = np.ones(n)
+    rate = counts / livetime
+    return rate, livetime, adj
+
+
+def test_marginal_observed_counts_sum_to_finite_bins():
+    rate, livetime, adj = _synthetic()
+    mu = anomaly.baseline_mean(rate)
+    m = anomaly.marginal_distribution(rate, livetime, adj, mu)
+    assert sum(m["observed"]) == len(rate)
+    assert len(m["edges"]) == len(m["observed"]) + 1
+    assert 10 <= len(m["observed"]) <= 40
+
+
+def test_marginal_expected_total_matches_bin_count_and_no_scipy():
+    import sys
+    rate, livetime, adj = _synthetic()
+    mu = anomaly.baseline_mean(rate)
+    m = anomaly.marginal_distribution(rate, livetime, adj, mu)
+    # Expected counts across all buckets ~ number of bins (mass mostly inside range)
+    assert sum(m["expected"]) == pytest.approx(len(rate), rel=0.05)
+    assert "scipy" not in sys.modules
+
+
+def test_marginal_degenerate_returns_empty():
+    rate = np.array([np.nan, 0.48])
+    m = anomaly.marginal_distribution(rate, np.array([3600.0, 3600.0]),
+                                      np.array([1.0, 1.0]), 0.48)
+    assert m["observed"] == [] and m["edges"] == [] and m["expected"] == []

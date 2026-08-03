@@ -134,3 +134,53 @@ def threshold_rates(k_counts: np.ndarray, livetime_s: np.ndarray,
 def flag_bins(counts: np.ndarray, k_lo: np.ndarray, k_hi: np.ndarray) -> np.ndarray:
     counts = np.asarray(counts)
     return (counts <= np.asarray(k_lo)) | (counts >= np.asarray(k_hi))
+
+
+def _fd_bucket_count(values: np.ndarray) -> int:
+    n = values.size
+    if n < 2:
+        return 10
+    q75, q25 = np.percentile(values, [75, 25])
+    iqr = q75 - q25
+    if iqr <= 0:
+        return 10
+    width = 2.0 * iqr / (n ** (1.0 / 3.0))
+    span = float(values.max() - values.min())
+    if width <= 0 or span <= 0:
+        return 10
+    return int(min(40, max(10, math.ceil(span / width))))
+
+
+def marginal_distribution(corrected_rate_hz, livetime_s, adj, mu) -> dict:
+    """Observed rate histogram plus exact-Poisson expected counts per bucket.
+
+    Buckets are chosen via the Freedman-Diaconis rule (clamped to [10, 40])
+    over the finite rates. For each bucket h and good bin i, the expected
+    count contribution is the exact-Poisson probability mass that bin i's
+    count falls within the bucket's rate range, summed over all good bins.
+    """
+    r = np.asarray(corrected_rate_hz, dtype=float)
+    T = np.asarray(livetime_s, dtype=float)
+    a = np.asarray(adj, dtype=float)
+    good = np.isfinite(r) & np.isfinite(T) & (T > 0) & np.isfinite(a) & (a > 0)
+    rg, Tg, ag = r[good], T[good], a[good]
+    if rg.size < 2:
+        return {"edges": [], "observed": [], "expected": []}
+
+    h = _fd_bucket_count(rg)
+    observed, edges = np.histogram(rg, bins=h)
+    lam = lambda_per_bin(mu, Tg, ag)  # per good bin
+
+    expected = np.zeros(h, dtype=float)
+    for hbin in range(h):
+        lo_rate, hi_rate = edges[hbin], edges[hbin + 1]
+        for i in range(rg.size):
+            l_k = math.ceil(lo_rate * Tg[i] / ag[i])
+            u_k = math.ceil(hi_rate * Tg[i] / ag[i]) - 1
+            if u_k < l_k:
+                continue
+            expected[hbin] += poisson_cdf(u_k, lam[i]) - poisson_cdf(l_k - 1, lam[i])
+
+    return {"edges": edges.tolist(),
+            "observed": observed.astype(int).tolist(),
+            "expected": expected.tolist()}
