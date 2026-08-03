@@ -135,15 +135,20 @@ def test_write_html_produces_a_self_contained_file(tmp_path):
 
 def test_page_has_a_checkbox_per_series(tmp_path):
     rs, corr, aligned, meta = make_inputs()
+    dets = [DetectorSeries("Muon rate", rs, corr)]
+    n_primary = len(dets) + len(aligned)
     for kind, fig, stacked in (
-        ("overlay", build_overlay([DetectorSeries("Muon rate", rs, corr)], aligned, meta, rs.bin_mid_utc), False),
-        ("side", build_side_by_side([DetectorSeries("Muon rate", rs, corr)], aligned, meta, rs.bin_mid_utc), True),
+        ("overlay", build_overlay(dets, aligned, meta, rs.bin_mid_utc), False),
+        ("side", build_side_by_side(dets, aligned, meta, rs.bin_mid_utc), True),
     ):
         out = tmp_path / (kind + ".html")
         write_html(fig, str(out), stacked=stacked)
         content = out.read_text()
         n_boxes = content.count('type="checkbox"')
-        assert n_boxes == len(fig.data), (kind, n_boxes, len(fig.data))
+        # Checkboxes are built from primary (detector + external) traces only;
+        # the hidden per-detector anomaly traces appended after them must not
+        # get their own checkbox (see test_series_checkboxes_exclude_anomaly_traces).
+        assert n_boxes == n_primary, (kind, n_boxes, n_primary)
         assert "Neutron monitor" in content and "Kp index" in content
 
 
@@ -394,8 +399,10 @@ def test_write_combined_html_one_file_two_figs(tmp_path):
     assert 'id="viz-overlay"' in content and 'id="viz-side"' in content
     # Tab bar with both buttons.
     assert 'id="tab-overlay"' in content and 'id="tab-side"' in content
-    # One checkbox per series (3 traces here: 1 detector + 2 external), not two.
-    assert content.count('type="checkbox"') == len(ov.data)
+    # One checkbox per primary series (3 traces here: 1 detector + 2 external),
+    # excluding the hidden per-detector anomaly traces appended after them.
+    n_primary = len(dets) + len(aligned)
+    assert content.count('type="checkbox"') == n_primary
     # Both figures' configs are embedded.
     assert '"overlay"' in content and '"side"' in content
     # Self-contained and non-trivial (JS bundle inlined once).
@@ -494,6 +501,92 @@ def test_side_by_side_units_are_hz():
     fig = build_side_by_side(dets, aligned, meta, rs.bin_mid_utc)
     cfg = plotting._figure_config(fig, stacked=True)
     assert cfg["units"] == "hz"
+
+
+def test_series_checkboxes_exclude_anomaly_traces(tmp_path):
+    """The combined page's checkbox list must span only the primary
+    (detector + external) traces; the hidden per-detector anomaly traces
+    (mean/lower/upper/flagged) must not get their own checkbox, or an
+    unrelated toggle would restyle them via applyVisibility's index-aligned
+    Plotly.restyle call."""
+    import re
+
+    rs, corr, aligned, meta = make_inputs()
+    dets = [DetectorSeries("Muon rate", rs, corr)]
+    n_primary = len(dets) + len(aligned)
+    ov = build_overlay(dets, aligned, meta, rs.bin_mid_utc)
+    sb = build_side_by_side(dets, aligned, meta, rs.bin_mid_utc)
+
+    out = tmp_path / "combined.html"
+    plotting.write_combined_html(ov, sb, str(out))
+    content = out.read_text()
+
+    n_boxes = content.count('type="checkbox"')
+    assert n_boxes == n_primary
+
+    labels = re.findall(r'</span>([^<]*)</label>', content)
+    assert len(labels) == n_primary
+    for label in labels:
+        low = label.lower()
+        for word in ("mean", "lower", "upper", "flagged"):
+            assert word not in low, (label, word)
+
+
+def test_anomaly_by_detector_indices_point_to_the_right_traces():
+    """cfg["anomalyByDetector"][d][role] must be the actual fig.data index of
+    that role's trace, not just a key that happens to exist."""
+    rs, corr, aligned, meta = make_inputs()
+    dets = [DetectorSeries("Muon rate", rs, corr)]
+    fig = build_overlay(dets, aligned, meta, rs.bin_mid_utc)
+    cfg = plotting._figure_config(fig, stacked=False)
+    for role_map in cfg["anomalyByDetector"]:
+        for role, idx in role_map.items():
+            assert fig.data[idx].meta["anomaly"] == role
+
+
+def test_payload_none_substitutes_non_finite_rate():
+    det = make_detector("DetA")
+    det.correction.corrected_rate_hz[1] = np.nan
+    payload = plotting.build_anomaly_payload([det])
+    assert payload[0]["rate"][1] is None
+    assert payload[0]["good"][1] is False
+    # untouched bins stay real numbers / good
+    assert payload[0]["rate"][0] is not None
+    assert payload[0]["good"][0] is True
+
+
+def test_outlier_trace_contains_exactly_the_flagged_bins():
+    """A gross count outlier (way outside the exact-Poisson band implied by
+    the run's mean rate) must show up in the outlier trace, and nowhere
+    else."""
+    det = make_detector("DetA")
+    det.rs.counts[2] = 50_000  # ~30x the baseline count for this bin
+    aligned = []
+    meta = PlotMetadata("run", "OULU", "fit", [], [])
+    fig = build_overlay([det], aligned, meta, det.rs.bin_mid_utc)
+
+    outlier = next(t for t in fig.data
+                   if isinstance(t.meta, dict) and t.meta.get("anomaly") == "outlier")
+
+    mu = anomaly.baseline_mean(det.correction.corrected_rate_hz)
+    raw = det.rs.rate_hz
+    corrected = det.correction.corrected_rate_hz
+    adj = np.where((raw != 0) & np.isfinite(raw), corrected / raw, 1.0)
+    T = det.rs.livetime_s
+    k_lo = np.full(det.rs.counts.shape, -1)
+    k_hi = np.full(det.rs.counts.shape, np.iinfo(np.int64).max)
+    for i in range(len(det.rs.counts)):
+        lam_i = anomaly.lambda_per_bin(mu, T[i], adj[i])
+        k_lo[i], k_hi[i] = anomaly.threshold_counts(float(lam_i), 0.05)
+    expected_flags = anomaly.flag_bins(det.rs.counts, k_lo, k_hi)
+
+    # Plotly normalizes datetime64 -> python datetime on trace construction,
+    # so compare via numpy datetime64 conversion rather than raw equality.
+    got_x = np.array([np.datetime64(v) for v in outlier.x])
+    expected_x = np.array([det.rs.bin_mid_utc[i] for i in np.where(expected_flags)[0]])
+    assert len(got_x) == int(np.sum(expected_flags))
+    assert list(got_x) == list(expected_x)
+    assert np.datetime64(det.rs.bin_mid_utc[2]) in got_x
 
 
 def test_existing_controls_unaffected_by_anomaly_traces():

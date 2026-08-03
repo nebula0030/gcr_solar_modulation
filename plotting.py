@@ -309,6 +309,8 @@ def _anomaly_traces_for_detector(det: DetectorSeries, d_index: int, color: str,
     goodmask = np.isfinite(corrected) & np.isfinite(T) & (T > 0)
     for i in np.where(goodmask)[0]:
         lam_i = anomaly.lambda_per_bin(mu, T[i], adj[i])
+        if not np.isfinite(lam_i) or lam_i <= 0:
+            continue
         klo, khi = anomaly.threshold_counts(float(lam_i), 0.05)
         k_lo[i], k_hi[i] = klo, khi
         lower[i] = to_view(adj[i] * klo / T[i])
@@ -926,6 +928,13 @@ _COMBINED_JS = """
 """
 
 
+def _is_anomaly(t) -> bool:
+    """True for the hidden per-detector anomaly traces (mean/lower/upper/flagged)
+    tagged with meta={"anomaly": role, "det": idx}, so callers can exclude them
+    from anything keyed to the primary (detector+external) trace indices."""
+    return isinstance(t.meta, dict) and "anomaly" in t.meta
+
+
 def _trace_colors(fig: go.Figure) -> Tuple[List[str], List[str]]:
     """Light and dark colour for every trace, in trace order."""
     light, dark = [], []
@@ -944,9 +953,6 @@ def _figure_config(fig: go.Figure, stacked: bool) -> dict:
     """Per-figure config consumed by the page JS (colours, row map, margins,
     axis/annotation metadata). Shared by write_html and write_combined_html."""
     light, dark = _trace_colors(fig)
-
-    def _is_anomaly(t):
-        return isinstance(t.meta, dict) and "anomaly" in t.meta
 
     n_primary = sum(1 for t in fig.data if not _is_anomaly(t))
     n_detectors = sum(1 for t in fig.data
@@ -999,7 +1005,8 @@ def write_html(fig: go.Figure, path: str, stacked: bool = False) -> None:
     ``stacked`` marks the side-by-side figure, whose checkboxes additionally
     collapse a deselected panel so the remaining panels expand to fill.
     """
-    names = [t.name or "Series {0}".format(i + 1) for i, t in enumerate(fig.data)]
+    names = [t.name or "Series {0}".format(i + 1)
+             for i, t in enumerate(fig.data) if not _is_anomaly(t)]
     cfg = _figure_config(fig, stacked)
     light = cfg["traceColors"]["light"]
 
@@ -1066,7 +1073,7 @@ def write_combined_html(
     task). ``None`` embeds as an empty list.
     """
     names = [t.name or "Series {0}".format(i + 1)
-             for i, t in enumerate(overlay_fig.data)]
+             for i, t in enumerate(overlay_fig.data) if not _is_anomaly(t)]
     ov_cfg = _figure_config(overlay_fig, stacked=False)
     sb_cfg = _figure_config(side_fig, stacked=True)
     light = ov_cfg["traceColors"]["light"]
