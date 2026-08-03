@@ -627,7 +627,7 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
     var boxes = Array.prototype.slice.call(
       document.querySelectorAll("#series-list input[type=checkbox]"));
     var vis = boxes.map(function (b) {{ return b.checked ? true : "legendonly"; }});
-    Plotly.restyle(gd, {{ visible: vis }});
+    Plotly.restyle(gd, {{ visible: vis }}, vis.map(function (_, i) {{ return i; }}));
 
     if (!CFG.stacked) {{ fitHeight(); return; }}
     /* Collapse hidden panels so the remaining ones expand to fill. Row 1 is
@@ -882,8 +882,9 @@ _COMBINED_JS = """
   function applyVisibility() {
     var boxes = checkboxes();
     var vis = boxes.map(function (b) { return b.checked ? true : "legendonly"; });
-    Plotly.restyle(GD.overlay, { visible: vis });
-    Plotly.restyle(GD.side, { visible: vis });
+    var idx = vis.map(function (_, i) { return i; });
+    Plotly.restyle(GD.overlay, { visible: vis }, idx);
+    Plotly.restyle(GD.side, { visible: vis }, idx);
     collapseStacked(CFG.views.side, GD.side, boxes).then(fitActive);
   }
 

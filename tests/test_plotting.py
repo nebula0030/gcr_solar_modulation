@@ -601,3 +601,140 @@ def test_existing_controls_unaffected_by_anomaly_traces():
     assert cfg["nRows"] == 1 + len(aligned)
     n_primary = 1 + len(aligned)
     assert len(cfg["rowOfTrace"]) == n_primary
+
+
+# --- series-checkbox restyle must not sweep the hidden anomaly traces ------
+
+
+def _find_chrome_binary():
+    """Best-effort discovery of a local Chrome/Chromium binary for the
+    headless runtime check below. Returns None if nothing usable is found."""
+    import shutil
+
+    candidates = [
+        "google-chrome", "google-chrome-stable", "chromium", "chromium-browser",
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        "/Applications/Chromium.app/Contents/MacOS/Chromium",
+    ]
+    for c in candidates:
+        if "/" in c:
+            import os
+            if os.path.isfile(c) and os.access(c, os.X_OK):
+                return c
+        else:
+            found = shutil.which(c)
+            if found:
+                return found
+    return None
+
+
+def test_series_visibility_restyle_targets_primary_trace_indices_only():
+    """Both applyVisibility() implementations (single-page and combined-page
+    templates) must restyle an explicit primary-trace index list, never a
+    bare `{ visible: vis }` with no index argument -- Plotly applies an
+    unindexed restyle's array cyclically (modulo) across ALL traces in `gd`,
+    which would flip the hidden anomaly traces (appended after the primary
+    traces) whenever an unrelated series checkbox is toggled.
+
+    This assertion runs unconditionally (no browser required); the actual
+    runtime behavior is verified by the headless-Chrome test below."""
+    import pathlib
+    import re
+
+    text = pathlib.Path(plotting.__file__).read_text()
+
+    # The explicit-index form must be present for both applyVisibility sites.
+    explicit_index_calls = re.findall(
+        r"vis\.map\(function \(_, i\) \{+ ?return i; ?\}+\)", text)
+    assert len(explicit_index_calls) >= 2, (
+        "expected an explicit-index vis.map(...) restyle argument in both "
+        "the single-page and combined-page applyVisibility() implementations"
+    )
+
+    # No remaining unqualified `{ visible: vis }` restyle (no 3rd/index arg)
+    # anywhere in the module -- that is exactly the leak this test guards.
+    unqualified = re.findall(
+        r"Plotly\.restyle\(\s*(?:gd|GD\.\w+)\s*,\s*\{+\s*visible:\s*vis\s*\}+\s*\)",
+        text)
+    assert unqualified == [], unqualified
+
+
+def test_headless_toggle_leaves_anomaly_traces_hidden(tmp_path):
+    """Runtime regression test for the restyle-index leak: load the combined
+    page in headless Chrome, toggle an unrelated (external-series) checkbox
+    to fire applyVisibility(), then read back gd.data[k].visible for every
+    trace tagged meta.anomaly. All of them must stay False -- if the restyle
+    call regresses to an unindexed `{ visible: vis }`, Plotly's cyclic
+    application will flip some of these to true/"legendonly".
+
+    Skipped (not failed) when no local Chrome/Chromium binary is available,
+    since the pytest suite must stay runnable in environments without one;
+    test_series_visibility_restyle_targets_primary_trace_indices_only above
+    provides the non-headless fallback guard."""
+    import json as _json
+    import re
+    import subprocess
+
+    chrome = _find_chrome_binary()
+    if chrome is None:
+        pytest.skip("no local Chrome/Chromium binary found for headless check")
+
+    rs, corr, aligned, meta = make_inputs()
+    dets = [DetectorSeries("Muon rate", rs, corr)]
+    ov = build_overlay(dets, aligned, meta, rs.bin_mid_utc)
+    sb = build_side_by_side(dets, aligned, meta, rs.bin_mid_utc)
+    n_primary = len(dets) + len(aligned)
+    assert n_primary >= 2, "need at least one non-detector checkbox to toggle"
+
+    out = tmp_path / "combined.html"
+    plotting.write_combined_html(ov, sb, str(out))
+
+    probe_js = """
+<script>
+(function () {
+  function run() {
+    var boxes = document.querySelectorAll("#series-list input[type=checkbox]");
+    var target = boxes[1];
+    target.checked = false;
+    target.dispatchEvent(new Event("change", { bubbles: true }));
+
+    var results = [];
+    ["overlay", "side"].forEach(function (view) {
+      var gd = document.getElementById("viz-" + view).querySelector(".plotly-graph-div");
+      gd.data.forEach(function (t, i) {
+        if (t.meta && t.meta.anomaly) {
+          results.push(view + ":" + i + ":" + t.meta.anomaly + ":" + String(t.visible));
+        }
+      });
+    });
+    var pre = document.createElement("pre");
+    pre.id = "probe";
+    pre.textContent = results.join("\\n");
+    document.body.appendChild(pre);
+  }
+  if (document.readyState === "complete") { setTimeout(run, 500); }
+  else { window.addEventListener("load", function () { setTimeout(run, 500); }); }
+})();
+</script>
+"""
+    content = out.read_text()
+    content = content.replace("</body>", probe_js + "\n</body>")
+    out.write_text(content)
+
+    result = subprocess.run(
+        [chrome, "--headless=new", "--disable-gpu", "--no-sandbox",
+         "--virtual-time-budget=5000", "--dump-dom", f"file://{out}"],
+        capture_output=True, text=True, timeout=60,
+    )
+    dom = result.stdout
+    m = re.search(r'<pre id="probe">(.*?)</pre>', dom, re.S)
+    assert m, (
+        f"probe output not found in dumped DOM "
+        f"(chrome rc={result.returncode}, stderr={result.stderr[-2000:]})"
+    )
+    lines = [ln for ln in m.group(1).splitlines() if ln.strip()]
+    assert len(lines) == 2 * 4, f"expected 8 anomaly-trace rows, got: {lines}"
+    for line in lines:
+        assert line.endswith(":false"), (
+            f"anomaly trace leaked visible after unrelated toggle: {line}"
+        )
