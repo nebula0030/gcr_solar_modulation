@@ -399,10 +399,12 @@ def test_write_combined_html_one_file_two_figs(tmp_path):
     assert 'id="viz-overlay"' in content and 'id="viz-side"' in content
     # Tab bar with both buttons.
     assert 'id="tab-overlay"' in content and 'id="tab-side"' in content
-    # One checkbox per primary series (3 traces here: 1 detector + 2 external),
-    # excluding the hidden per-detector anomaly traces appended after them.
+    # One series checkbox per primary series (3 traces here: 1 detector + 2
+    # external), excluding the hidden per-detector anomaly traces appended
+    # after them. Series checkboxes carry a data-i attribute; the standalone
+    # anomaly-toggle checkbox does not, so counting data-i isolates them.
     n_primary = len(dets) + len(aligned)
-    assert content.count('type="checkbox"') == n_primary
+    assert content.count('data-i="') == n_primary
     # Both figures' configs are embedded.
     assert '"overlay"' in content and '"side"' in content
     # Self-contained and non-trivial (JS bundle inlined once).
@@ -524,7 +526,8 @@ def test_series_checkboxes_exclude_anomaly_traces(tmp_path):
     plotting.write_combined_html(ov, sb, str(out))
     content = out.read_text()
 
-    n_boxes = content.count('type="checkbox"')
+    # Series checkboxes carry data-i; the anomaly-toggle checkbox does not.
+    n_boxes = content.count('data-i="')
     assert n_boxes == n_primary
 
     labels = re.findall(r'</span>([^<]*)</label>', content)
@@ -950,3 +953,120 @@ def test_js_poisson_matches_python(tmp_path):
         assert g_cdf == pytest.approx(e_cdf, abs=1e-9), (
             f"cdf mismatch at k={k}, lam={lam}: python={e_cdf} js={g_cdf}"
         )
+
+
+# --- interactive anomaly control: markup + headless toggle behaviour -------
+
+
+def _detector_with_one_outlier(name="DetA", n=6, base=0.47, outlier_bin=3,
+                               outlier_counts=6000):
+    """One detector whose bin ``outlier_bin`` carries an obviously anomalous
+    (far above the exact-Poisson upper threshold) raw count, so toggling the
+    control flags exactly that bin."""
+    start = np.datetime64("2026-07-10T00:00:00.000000000")
+    off = (np.arange(n) * 3600.0 * 1e9).astype("timedelta64[ns]")
+    counts = np.full(n, 1700, dtype=np.int64)
+    counts[outlier_bin] = outlier_counts
+    rs = RateSeries(start + off, start + off, counts,
+                    np.full(n, 3600.0), np.full(n, base), np.full(n, 0.01),
+                    np.linspace(1006, 1010, n), np.linspace(22, 25, n), 3600.0)
+    cr = CorrectionResult(np.full(n, base), np.full(n, 0.01), -0.0013, -0.004,
+                          2e-4, 5e-4, 0.85, 1008.0, 23.5, "fit", [])
+    return DetectorSeries(name=name, rs=rs, correction=cr)
+
+
+def test_combined_page_has_anomaly_control_and_list(tmp_path):
+    rs, corr, aligned, meta = make_inputs()
+    dets = [DetectorSeries("Muon rate", rs, corr)]
+    ov = build_overlay(dets, aligned, meta, rs.bin_mid_utc)
+    sb = build_side_by_side(dets, aligned, meta, rs.bin_mid_utc)
+    out = tmp_path / "c.html"
+    plotting.write_combined_html(
+        ov, sb, str(out), anomaly=plotting.build_anomaly_payload(dets))
+    html = out.read_text()
+    assert 'id="anomaly-toggle"' in html
+    assert 'id="anomaly-p"' in html
+    assert 'id="anomaly-readout"' in html
+    assert 'id="flagged-list"' in html
+    assert "detectorsAnomaly" in html
+    assert "applyAnomaly" in html
+    # the number input defaults to p=0.05 and starts disabled
+    assert 'value="0.05"' in html and "disabled" in html
+
+
+def test_headless_toggle_shows_lines_and_flags(tmp_path):
+    """Render a one-detector run with one obvious outlier bin, click
+    #anomaly-toggle on load, and read back (via a probe DOM node): the outlier
+    trace has >=1 point, #flagged-list names the detector, and at least one
+    anomaly trace is visible in BOTH the overlay and side graph divs."""
+    import re
+    import subprocess
+
+    chrome = _find_chrome_binary()
+    if chrome is None:
+        pytest.skip("no local Chrome/Chromium binary found for headless check")
+
+    _rs, _corr, aligned, meta = make_inputs()
+    det = _detector_with_one_outlier(name="DetA")
+    dets = [det]
+    master = det.rs.bin_mid_utc
+    ov = build_overlay(dets, aligned, meta, master)
+    sb = build_side_by_side(dets, aligned, meta, master)
+
+    out = tmp_path / "combined.html"
+    plotting.write_combined_html(
+        ov, sb, str(out), anomaly=plotting.build_anomaly_payload(dets))
+
+    probe_js = """
+<script>
+(function () {
+  function run() {
+    var toggle = document.getElementById("anomaly-toggle");
+    toggle.checked = true;
+    toggle.dispatchEvent(new Event("change", { bubbles: true }));
+
+    function anyVisible(view) {
+      var gd = document.getElementById("viz-" + view)
+        .querySelector(".plotly-graph-div");
+      return gd.data.some(function (t) {
+        return t.meta && t.meta.anomaly && t.visible === true; });
+    }
+    var ovgd = document.getElementById("viz-overlay")
+      .querySelector(".plotly-graph-div");
+    var out = ovgd.data.filter(function (t) {
+      return t.meta && t.meta.anomaly === "outlier"; })[0];
+    var res = {
+      outlierPoints: (out && out.x) ? out.x.length : 0,
+      listText: document.getElementById("flagged-list").textContent,
+      overlayVisible: anyVisible("overlay"),
+      sideVisible: anyVisible("side")
+    };
+    var pre = document.createElement("pre");
+    pre.id = "probe";
+    pre.textContent = JSON.stringify(res);
+    document.body.appendChild(pre);
+  }
+  if (document.readyState === "complete") { setTimeout(run, 500); }
+  else { window.addEventListener("load", function () { setTimeout(run, 500); }); }
+})();
+</script>
+"""
+    content = out.read_text().replace("</body>", probe_js + "\n</body>")
+    out.write_text(content)
+
+    result = subprocess.run(
+        [chrome, "--headless=new", "--disable-gpu", "--no-sandbox",
+         "--virtual-time-budget=5000", "--dump-dom", f"file://{out}"],
+        capture_output=True, text=True, timeout=60,
+    )
+    m = re.search(r'<pre id="probe">(.*?)</pre>', result.stdout, re.S)
+    assert m, (
+        f"probe output not found (chrome rc={result.returncode}, "
+        f"stderr={result.stderr[-2000:]})"
+    )
+    res = json.loads(m.group(1))
+    assert res["outlierPoints"] >= 1, res
+    assert res["listText"].strip(), "flagged-list should be populated"
+    assert "DetA" in res["listText"], res["listText"]
+    assert res["overlayVisible"] is True, res
+    assert res["sideVisible"] is True, res

@@ -468,6 +468,7 @@ def build_overlay(
         xaxis3=dict(domain=[0.85, 1.0], anchor="y", title="bins",
                     showgrid=False, linecolor=_MUTED_INK),
         legend=dict(orientation="h", yanchor="top", y=-0.14, x=0),
+        barmode="overlay",
     )
     _add_gap_bands(fig, gaps)
     _apply_common_layout(fig, meta, "Muon Rate vs. Solar Activity — Overlay",
@@ -542,7 +543,7 @@ def build_side_by_side(
             domain=[0.85, 1.0], anchor="y", title="bins", showgrid=False,
             linecolor=_MUTED_INK),
     })
-    fig.update_layout(showlegend=False)
+    fig.update_layout(showlegend=False, barmode="overlay")
     _add_gap_bands(fig, gaps, per_row=n_rows)
     _apply_common_layout(fig, meta,
                          "Muon Rate vs. Solar Activity — Aligned Panels",
@@ -793,9 +794,14 @@ _COMBINED_TEMPLATE = """<!DOCTYPE html>
   .series-list label { display:flex; align-items:center; gap:6px;
     white-space:nowrap; cursor:pointer; }
   .swatch { width:11px; height:11px; border-radius:2px; flex:none; }
-  select, button { font:inherit; padding:5px 9px; border-radius:6px;
-    border:1px solid var(--border); background:var(--surface); color:var(--text);
-    cursor:pointer; }
+  select, button, input[type=number] { font:inherit; padding:5px 9px;
+    border-radius:6px; border:1px solid var(--border);
+    background:var(--surface); color:var(--text); cursor:pointer; }
+  input[type=number]:disabled { opacity:.5; cursor:not-allowed; }
+  .muted { color:var(--secondary); font-size:12px; }
+  .anomaly-ctl label { display:inline-flex; align-items:center; gap:6px;
+    white-space:nowrap; cursor:pointer; }
+  #flagged-list { margin-top:6px; max-width:560px; line-height:1.6; }
   .run-header { margin:8px 4px 10px; color:var(--secondary); }
   .run-header > summary { cursor:pointer; font-size:17px; font-weight:700;
     color:var(--text); margin-bottom:6px; }
@@ -816,6 +822,13 @@ _COMBINED_TEMPLATE = """<!DOCTYPE html>
     <select id="line-spec">__LINE_SPEC_OPTIONS__</select></div>
   <fieldset><legend>Series</legend>
     <div class="series-list" id="series-list">__SERIES_CHECKBOXES__</div></fieldset>
+  <div class="anomaly-ctl"><span class="ctl-label">Anomaly detection</span>
+    <label><input type="checkbox" id="anomaly-toggle"> Flag outliers (Poisson)</label>
+    <label style="margin-left:12px">p =
+      <input type="number" id="anomaly-p" value="0.05" min="0.0001" max="0.9999"
+        step="0.01" style="width:5em" disabled></label>
+    <span id="anomaly-readout" class="muted" style="margin-left:12px"></span>
+    <div id="flagged-list" class="muted"></div></div>
 </div>
 <details class="run-header" open>
   <summary>__HEADER_TITLE__</summary>
@@ -929,6 +942,7 @@ _COMBINED_JS = """
 
   document.getElementById("theme-toggle").addEventListener("click", function () {
     applyTheme(mode === "dark" ? "light" : "dark");
+    applyAnomaly();  /* re-apply alert/ink colours the theme restyle overwrote */
   });
 
   /* ---- series checkboxes (both views) ------------------------------- */
@@ -968,7 +982,7 @@ _COMBINED_JS = """
   }
 
   document.getElementById("series-list")
-    .addEventListener("change", applyVisibility);
+    .addEventListener("change", function () { applyVisibility(); applyAnomaly(); });
 
   /* ---- muon-rate line spec (detector traces, both views) ------------ */
   document.getElementById("line-spec").addEventListener("change", function (e) {
@@ -996,14 +1010,119 @@ _COMBINED_JS = """
     Plotly.relayout(GD[view], { autosize: true });
     Plotly.Plots.resize(GD[view]);
     fitActive();
+    applyAnomaly();  /* keep the newly-shown view's anomaly overlay correct */
   }
   document.getElementById("tab-overlay").addEventListener("click",
     function () { activate("overlay"); });
   document.getElementById("tab-side").addEventListener("click",
     function () { activate("side"); });
 
+  /* ---- anomaly detection (exact-Poisson, both views) ---------------- */
+  function anomActive() {
+    return document.getElementById("anomaly-toggle").checked;
+  }
+  function anomP() {
+    return Math.min(0.9999, Math.max(1e-4,
+      parseFloat(document.getElementById("anomaly-p").value) || 0.05));
+  }
+  function toView(v, mu, units) {
+    return units === "pct" ? 100 * (v - mu) / mu : v;
+  }
+
+  /* Per-detector exact-Poisson thresholds + flagged bin indices. kLo/kHi
+     hold null for bins that are skipped (bad data / non-finite lambda) so
+     the caller can leave those threshold-line points blank. */
+  function computeDetector(d, p) {
+    var kLo = [], kHi = [], flag = [];
+    for (var i = 0; i < d.counts.length; i++) {
+      if (!d.good[i]) { kLo.push(null); kHi.push(null); continue; }
+      var lam = d.mu * d.livetime[i] / d.adj[i];
+      if (!isFinite(lam) || lam <= 0) { kLo.push(null); kHi.push(null); continue; }
+      var t = window.__anom.poissonThresholds(lam, p);
+      kLo.push(t.kLo); kHi.push(t.kHi);
+      if (d.counts[i] <= t.kLo || d.counts[i] >= t.kHi) { flag.push(i); }
+    }
+    return { kLo: kLo, kHi: kHi, flag: flag };
+  }
+
+  function applyAnomaly() {
+    var on = anomActive(), p = anomP();
+    document.getElementById("anomaly-p").disabled = !on;
+    document.getElementById("anomaly-readout").textContent = on
+      ? ("p = " + p + " \\u2192 " + (100 * p / 2).toFixed(2) + "% per tail") : "";
+
+    var alertCol = (mode === "dark") ? "#e66767" : "#c0392b";
+    var inkCol = (mode === "dark") ? "#c3c2b7" : "#52514e";
+    var boxes = checkboxes();
+    var dets = CFG.detectorsAnomaly || [];
+    var comp = dets.map(function (d) { return computeDetector(d, p); });
+
+    VIEWS.forEach(function (vn) {
+      var gd = GD[vn], view = CFG.views[vn], units = view.units;
+      var aByDet = view.anomalyByDetector || [];
+      var mByDet = view.marginalByDetector || [];
+      dets.forEach(function (d, di) {
+        var idx = aByDet[di], midx = mByDet[di];
+        if (!idx || !midx) { return; }
+        var aidx = [idx.mean, idx.lower, idx.upper, idx.outlier,
+                    midx.hist, midx.poisson];
+        var vis = on && boxes[di] && boxes[di].checked;
+        if (!vis) { Plotly.restyle(gd, { visible: false }, aidx); return; }
+
+        var c = comp[di], mu = d.mu, lower = [], upper = [];
+        for (var i = 0; i < d.livetime.length; i++) {
+          if (c.kLo[i] === null) { lower.push(null); upper.push(null); }
+          else {
+            lower.push(toView(d.adj[i] * c.kLo[i] / d.livetime[i], mu, units));
+            upper.push(toView(d.adj[i] * c.kHi[i] / d.livetime[i], mu, units));
+          }
+        }
+        Plotly.restyle(gd, { y: [lower] }, [idx.lower]);
+        Plotly.restyle(gd, { y: [upper] }, [idx.upper]);
+        Plotly.restyle(gd, {
+          x: [c.flag.map(function (i) { return d.t[i]; })],
+          y: [c.flag.map(function (i) { return toView(d.rate[i], mu, units); })]
+        }, [idx.outlier]);
+
+        var col = view.traceColors[mode][di];
+        Plotly.restyle(gd, { "line.color": col },
+          [idx.mean, idx.lower, idx.upper]);
+        Plotly.restyle(gd,
+          { "marker.color": alertCol, "marker.line.color": alertCol },
+          [idx.outlier]);
+        Plotly.restyle(gd, { "marker.color": col }, [midx.hist]);
+        Plotly.restyle(gd, { "line.color": inkCol }, [midx.poisson]);
+        Plotly.restyle(gd, { visible: true }, aidx);
+      });
+    });
+
+    var listHtml = "";
+    if (on) {
+      dets.forEach(function (d, di) {
+        var c = comp[di];
+        listHtml += "<b>" + d.name + "</b>: " + c.flag.length + " flagged";
+        if (c.flag.length) {
+          listHtml += " \\u2014 " + c.flag.slice(0, 20).map(function (i) {
+            return d.t[i]; }).join(", ");
+          if (c.flag.length > 20) { listHtml += ", \\u2026"; }
+        }
+        listHtml += "<br>";
+      });
+    }
+    document.getElementById("flagged-list").innerHTML = listHtml;
+  }
+
+  document.getElementById("anomaly-toggle")
+    .addEventListener("change", applyAnomaly);
+  var _anomTimer;
+  document.getElementById("anomaly-p").addEventListener("input", function () {
+    clearTimeout(_anomTimer);
+    _anomTimer = setTimeout(applyAnomaly, 150);
+  });
+
   /* initial sizing of the active (overlay) view */
   fitActive();
+  applyAnomaly();  /* set control state + keep hidden traces hidden on load */
 })();
 """
 
