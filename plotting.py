@@ -827,6 +827,7 @@ _COMBINED_TEMPLATE = """<!DOCTYPE html>
 </div>
 <div id="viz-overlay" class="viz">__PLOT_OVERLAY__</div>
 <div id="viz-side" class="viz" style="display:none">__PLOT_SIDE__</div>
+__NUMERICS_JS__
 <script>
 __COMBINED_JS__
 </script>
@@ -1139,6 +1140,59 @@ def write_html(fig: go.Figure, path: str, stacked: bool = False) -> None:
         handle.write(page)
 
 
+def _anomaly_js_numerics():
+    """Self-contained JS exact-Poisson numerics, mirroring anomaly.py.
+
+    Exposes ``window.__anom.poissonCdf(k, lam)`` and
+    ``poissonThresholds(lam, p) -> {kLo, kHi}`` so the interactive anomaly
+    control can recompute exact-Poisson thresholds in the browser as ``p``
+    changes. ``gser``/``gcf`` use the same adaptive iteration cap and
+    non-convergence guard as anomaly._gser/_gcf, so large lambda (e.g. daily
+    binning, lambda ~ 43000) converges instead of silently under-summing.
+    """
+    return r"""
+<script>
+(function(){
+  var EPS=3e-14, FPMIN=1e-300;
+  function lgamma(x){
+    var c=[76.18009172947146,-86.50532032941677,24.01409824083091,
+      -1.231739572450155,0.1208650973866179e-2,-0.5395239384953e-5];
+    var y=x, tmp=x+5.5; tmp-=(x+0.5)*Math.log(tmp); var ser=1.000000000190015;
+    for(var j=0;j<6;j++){y+=1; ser+=c[j]/y;}
+    return -tmp+Math.log(2.5066282746310005*ser/x);
+  }
+  function gser(a,x){ if(x<=0)return 0; var ap=a,sum=1/a,del=sum;
+    var itmax=Math.max(1000, Math.floor(4*(a+x))), ok=false;
+    for(var n=0;n<itmax;n++){ap+=1; del*=x/ap; sum+=del;
+      if(Math.abs(del)<Math.abs(sum)*EPS){ok=true;break;}}
+    if(!ok) throw new Error("gser failed to converge");
+    return sum*Math.exp(-x+a*Math.log(x)-lgamma(a)); }
+  function gcf(a,x){ var b=x+1-a,c=1/FPMIN,d=1/b,h=d;
+    var itmax=Math.max(1000, Math.floor(4*(a+x))), ok=false;
+    for(var i=1;i<itmax;i++){var an=-i*(i-a); b+=2; d=an*d+b;
+      if(Math.abs(d)<FPMIN)d=FPMIN; c=b+an/c; if(Math.abs(c)<FPMIN)c=FPMIN;
+      d=1/d; var del=d*c; h*=del; if(Math.abs(del-1)<EPS){ok=true;break;}}
+    if(!ok) throw new Error("gcf failed to converge");
+    return Math.exp(-x+a*Math.log(x)-lgamma(a))*h; }
+  function gammq(a,x){ if(x<a+1) return 1-gser(a,x); return gcf(a,x); }
+  function poissonCdf(k,lam){ if(k<0)return 0; if(lam<=0)return 1;
+    return gammq(k+1,lam); }
+  function poissonThresholds(lam,p){
+    var half=p/2, spread=Math.floor(10*Math.sqrt(lam))+10;
+    var hiB=Math.floor(lam)+spread, loB=Math.max(0,Math.floor(lam)-spread);
+    var kLo, lo, hi, mid;
+    if(poissonCdf(0,lam)>half){kLo=-1;}
+    else{lo=0; hi=hiB; while(lo<hi){mid=(lo+hi+1)>>1;
+      if(poissonCdf(mid,lam)<=half)lo=mid; else hi=mid-1;} kLo=lo;}
+    lo=loB; hi=hiB; while(lo<hi){mid=(lo+hi)>>1;
+      if(1-poissonCdf(mid-1,lam)<=half)hi=mid; else lo=mid+1;}
+    return {kLo:kLo, kHi:lo};
+  }
+  window.__anom={poissonCdf:poissonCdf, poissonThresholds:poissonThresholds};
+})();
+</script>"""
+
+
 def write_combined_html(
     overlay_fig: go.Figure, side_fig: go.Figure, path: str,
     anomaly: Optional[List[dict]] = None,
@@ -1207,6 +1261,7 @@ def write_combined_html(
             .replace("__SERIES_CHECKBOXES__", checkboxes)
             .replace("__PLOT_OVERLAY__", plot_overlay)
             .replace("__PLOT_SIDE__", plot_side)
+            .replace("__NUMERICS_JS__", _anomaly_js_numerics())
             .replace("__COMBINED_JS__", js))
     with open(path, "w", encoding="utf-8") as handle:
         handle.write(page)

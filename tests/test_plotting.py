@@ -824,3 +824,129 @@ def test_headless_toggle_leaves_anomaly_traces_hidden(tmp_path):
         assert line.endswith(":false"), (
             f"anomaly trace leaked visible after unrelated toggle: {line}"
         )
+
+
+# --- embedded JS exact-Poisson numerics, verified against Python -----------
+
+
+def _eval_js_result(chrome, tmp_path, page_html, result_expr, *, name="probe"):
+    """Render ``page_html`` in headless Chrome, evaluate ``result_expr`` in a
+    load handler, serialize it into a ``<pre id="probe">`` node, then
+    ``--dump-dom`` the rendered page and parse the JSON back out.
+
+    This mirrors the deterministic dump-dom pattern used by
+    test_headless_toggle_leaves_anomaly_traces_hidden above -- reading
+    console output proved flaky across Chrome versions, so results are
+    smuggled through the DOM instead."""
+    import re
+    import subprocess
+
+    page = tmp_path / f"{name}.html"
+    probe_js = """
+<script>
+(function () {
+  function run() {
+    var result = (%s);
+    var pre = document.createElement("pre");
+    pre.id = "probe";
+    pre.textContent = JSON.stringify(result);
+    document.body.appendChild(pre);
+  }
+  if (document.readyState === "complete") { setTimeout(run, 100); }
+  else { window.addEventListener("load", function () { setTimeout(run, 100); }); }
+})();
+</script>
+""" % result_expr
+    page.write_text(page_html + probe_js)
+
+    result = subprocess.run(
+        [chrome, "--headless=new", "--disable-gpu", "--no-sandbox",
+         "--virtual-time-budget=5000", "--dump-dom", f"file://{page}"],
+        capture_output=True, text=True, timeout=60,
+    )
+    dom = result.stdout
+    m = re.search(r'<pre id="probe">(.*?)</pre>', dom, re.S)
+    assert m, (
+        f"probe output not found in dumped DOM "
+        f"(chrome rc={result.returncode}, stderr={result.stderr[-2000:]})"
+    )
+    return json.loads(m.group(1))
+
+
+def test_anomaly_js_numerics_fragment_has_expected_shape():
+    """Static shape check that runs unconditionally (no browser required):
+    the fragment defines window.__anom with poissonCdf/poissonThresholds,
+    and its gser/gcf use the adaptive iteration cap (matching anomaly.py's
+    _gser/_gcf), not a fixed ITMAX -- the fixed cap silently returns wrong
+    CDF values for large lambda (e.g. daily binning, lambda ~ 43000)."""
+    frag = plotting._anomaly_js_numerics()
+    assert "window.__anom" in frag
+    assert "poissonCdf" in frag and "poissonThresholds" in frag
+    assert "Math.max(1000, Math.floor(4*(a+x)))" in frag, (
+        "expected the adaptive iteration cap (mirroring anomaly._gser/_gcf); "
+        "a fixed ITMAX cap silently under-converges for large lambda"
+    )
+
+
+def test_anomaly_js_numerics_included_in_combined_page():
+    rs, corr, aligned, meta = make_inputs()
+    dets = [DetectorSeries("Muon rate", rs, corr)]
+    ov = build_overlay(dets, aligned, meta, rs.bin_mid_utc)
+    sb = build_side_by_side(dets, aligned, meta, rs.bin_mid_utc)
+    out_path = "/tmp/_cw_combined_js_numerics_probe.html"
+    import os
+    try:
+        plotting.write_combined_html(ov, sb, out_path)
+        content = open(out_path, encoding="utf-8").read()
+        assert "window.__anom" in content
+        assert "poissonThresholds" in content
+    finally:
+        if os.path.exists(out_path):
+            os.remove(out_path)
+
+
+def test_js_poisson_matches_python(tmp_path):
+    """Headless-Chrome verification that the embedded JS numerics agree
+    exactly with the Python reference (anomaly.threshold_counts /
+    anomaly.poisson_cdf) -- including a large-lambda case (daily binning,
+    lambda ~ 43200) that only the adaptive iteration cap converges on."""
+    chrome = _find_chrome_binary()
+    if chrome is None:
+        pytest.skip("no local Chrome/Chromium binary found for headless check")
+
+    frag = plotting._anomaly_js_numerics()
+    html_body = "<!doctype html><html><body>" + frag
+
+    cases = [(1000.0, 0.05), (1700.0, 0.01), (50.0, 0.1), (43200.0, 0.05)]
+    expected_thresholds = [anomaly.threshold_counts(lam, p) for (lam, p) in cases]
+
+    cases_js = json.dumps([[lam, p] for (lam, p) in cases])
+    got_thresholds = _eval_js_result(
+        chrome, tmp_path, html_body,
+        "%s.map(function(c){"
+        "var r=window.__anom.poissonThresholds(c[0],c[1]);"
+        "return [r.kLo,r.kHi];})" % cases_js,
+        name="thresholds",
+    )
+    for (lam, p), (e_lo, e_hi), (g_lo, g_hi) in zip(
+        cases, expected_thresholds, got_thresholds
+    ):
+        assert (g_lo, g_hi) == (e_lo, e_hi), (
+            f"threshold mismatch at lam={lam}, p={p}: "
+            f"python={e_lo, e_hi} js={g_lo, g_hi}"
+        )
+
+    # CDF agreement at a sample point per case, including the large-lambda one.
+    cdf_points = [(1000, 1000.0), (1700, 1700.0), (50, 50.0), (43200, 43200.0)]
+    expected_cdf = [anomaly.poisson_cdf(k, lam) for (k, lam) in cdf_points]
+    cdf_points_js = json.dumps([[k, lam] for (k, lam) in cdf_points])
+    got_cdf = _eval_js_result(
+        chrome, tmp_path, html_body,
+        "%s.map(function(c){return window.__anom.poissonCdf(c[0],c[1]);})"
+        % cdf_points_js,
+        name="cdf",
+    )
+    for (k, lam), e_cdf, g_cdf in zip(cdf_points, expected_cdf, got_cdf):
+        assert g_cdf == pytest.approx(e_cdf, abs=1e-9), (
+            f"cdf mismatch at k={k}, lam={lam}: python={e_cdf} js={g_cdf}"
+        )
