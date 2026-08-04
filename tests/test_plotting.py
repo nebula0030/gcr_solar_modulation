@@ -829,6 +829,81 @@ def test_headless_toggle_leaves_anomaly_traces_hidden(tmp_path):
         )
 
 
+def test_headless_anomaly_toggle_shows_then_hides_with_payload(tmp_path):
+    """Populated-payload runtime test: unlike the empty-payload leak test
+    above, this renders with a real anomaly payload so applyAnomaly's
+    per-detector restyle loop actually runs. Toggling #anomaly-toggle ON must
+    make anomaly/marginal traces visible in BOTH views; toggling it OFF must
+    hide every one of them again (index-scoped restyle, no leftover)."""
+    import re
+    import subprocess
+
+    chrome = _find_chrome_binary()
+    if chrome is None:
+        pytest.skip("no local Chrome/Chromium binary found for headless check")
+
+    rs, corr, aligned, meta = make_inputs()
+    dets = [DetectorSeries("Muon rate", rs, corr)]
+    ov = build_overlay(dets, aligned, meta, rs.bin_mid_utc)
+    sb = build_side_by_side(dets, aligned, meta, rs.bin_mid_utc)
+    payload = plotting.build_anomaly_payload(dets)
+
+    out = tmp_path / "combined_anom.html"
+    plotting.write_combined_html(ov, sb, str(out), anomaly=payload)
+
+    probe_js = """
+<script>
+(function () {
+  function visRows() {
+    var rows = [];
+    ["overlay", "side"].forEach(function (view) {
+      var gd = document.getElementById("viz-" + view).querySelector(".plotly-graph-div");
+      gd.data.forEach(function (t) {
+        if (t.meta && t.meta.anomaly) {
+          rows.push(view + ":" + t.meta.anomaly + ":" + String(t.visible));
+        }
+      });
+    });
+    return rows;
+  }
+  function run() {
+    var box = document.getElementById("anomaly-toggle");
+    box.checked = true; box.dispatchEvent(new Event("change", { bubbles: true }));
+    var onRows = visRows();
+    box.checked = false; box.dispatchEvent(new Event("change", { bubbles: true }));
+    var offRows = visRows();
+    var pre = document.createElement("pre");
+    pre.id = "probe";
+    pre.textContent = JSON.stringify({ on: onRows, off: offRows });
+    document.body.appendChild(pre);
+  }
+  if (document.readyState === "complete") { setTimeout(run, 700); }
+  else { window.addEventListener("load", function () { setTimeout(run, 700); }); }
+})();
+</script>
+"""
+    content = out.read_text().replace("</body>", probe_js + "\n</body>")
+    out.write_text(content)
+
+    result = subprocess.run(
+        [chrome, "--headless=new", "--disable-gpu", "--no-sandbox",
+         "--virtual-time-budget=6000", "--dump-dom", f"file://{out}"],
+        capture_output=True, text=True, timeout=60,
+    )
+    m = re.search(r'<pre id="probe">(.*?)</pre>', result.stdout, re.S)
+    assert m, (f"probe not found (rc={result.returncode}, "
+               f"stderr={result.stderr[-2000:]})")
+    data = json.loads(m.group(1))
+    # ON: at least one anomaly trace visible in EACH view (applyAnomaly ran).
+    assert any(r.startswith("overlay:") and r.endswith(":true")
+               for r in data["on"]), data["on"]
+    assert any(r.startswith("side:") and r.endswith(":true")
+               for r in data["on"]), data["on"]
+    # OFF: every anomaly trace hidden again in both views (no leftover).
+    for r in data["off"]:
+        assert r.endswith(":false"), "anomaly trace visible after off: " + r
+
+
 # --- embedded JS exact-Poisson numerics, verified against Python -----------
 
 

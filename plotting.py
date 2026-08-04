@@ -1096,14 +1096,20 @@ _COMBINED_JS = """
       });
     });
 
+    function escHtml(s) {
+      return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;");
+    }
+    function fmtT(s) { return String(s).slice(0, 16).replace("T", " ") + " UTC"; }
     var listHtml = "";
     if (on) {
       dets.forEach(function (d, di) {
         var c = comp[di];
-        listHtml += "<b>" + d.name + "</b>: " + c.flag.length + " flagged";
+        listHtml += "<b>" + escHtml(d.name) + "</b>: " + c.flag.length
+          + " flagged";
         if (c.flag.length) {
           listHtml += " \\u2014 " + c.flag.slice(0, 20).map(function (i) {
-            return d.t[i]; }).join(", ");
+            return fmtT(d.t[i]); }).join(", ");
           if (c.flag.length > 20) { listHtml += ", \\u2026"; }
         }
         listHtml += "<br>";
