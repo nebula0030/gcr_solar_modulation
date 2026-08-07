@@ -458,18 +458,27 @@ def build_overlay(
                 det, d_index, _detector_color(d_index), "pct", mu, "x3"):
             fig.add_trace(tr)
 
-    fig.update_layout(
+    # The secondary axis carries external series plotted in native units (all
+    # non-modulation sources; NMDB is shown as % deviation on the primary
+    # axis). Only add it when something actually uses it -- otherwise Plotly
+    # draws an empty, auto-ranged axis whose SI-prefixed ticks ("15u" etc.)
+    # clutter the plot and sit confusingly next to the y-axis marginal.
+    has_secondary = any(s.source not in MODULATION_SOURCES for s in aligned)
+    layout = dict(
         xaxis=dict(title="Time (UTC)", gridcolor=_GRIDLINE_COLOR,
                    linecolor=_MUTED_INK, domain=[0.0, 0.82]),
         yaxis=dict(title="Deviation from run mean (%)",
                    gridcolor=_GRIDLINE_COLOR, linecolor=_MUTED_INK),
-        yaxis2=dict(title="Other indices (native units)", overlaying="y",
-                    side="right", showgrid=False, linecolor=_MUTED_INK),
         xaxis3=dict(domain=[0.85, 1.0], anchor="y", title="bins",
                     showgrid=False, linecolor=_MUTED_INK),
         legend=dict(orientation="h", yanchor="top", y=-0.14, x=0),
         barmode="overlay",
     )
+    if has_secondary:
+        layout["yaxis2"] = dict(title="Other indices (native units)",
+                                overlaying="y", side="right", showgrid=False,
+                                linecolor=_MUTED_INK)
+    fig.update_layout(**layout)
     _add_gap_bands(fig, gaps)
     _apply_common_layout(fig, meta, "Muon Rate vs. Solar Activity — Overlay",
                          plot_height=460, bottom_margin=120)
@@ -1196,7 +1205,8 @@ def _figure_config(fig: go.Figure, stacked: bool) -> dict:
         "minOverlayPlot": 340,
         "rowOfTrace": row_of_trace,
         "muonTrace": 0,
-        "hasSecondaryAxis": not stacked,
+        "hasSecondaryAxis":
+            getattr(getattr(fig.layout, "yaxis2", None), "overlaying", None) == "y",
         "annotationRoles": annotation_roles,
         "units": units,
         "anomalyByDetector": [anomaly_by_det[d] for d in sorted(anomaly_by_det)],

@@ -384,6 +384,26 @@ def test_figure_config_shapes_for_overlay_and_side():
     assert len(sb_cfg["traceColors"]["dark"]) == len(sb.data)
 
 
+def test_overlay_secondary_axis_only_present_with_native_unit_series():
+    """The 'Other indices (native units)' secondary axis must appear only when
+    a non-modulation external series actually uses it. Otherwise Plotly draws
+    an empty, SI-prefixed ('15u') axis that clutters the plot and sits
+    confusingly beside the y-axis marginal."""
+    rs, corr, aligned, meta = make_inputs()
+    dets = [DetectorSeries("Muon rate", rs, corr)]
+
+    # No external series at all -> no secondary axis.
+    ov_none = build_overlay(dets, [], meta, rs.bin_mid_utc)
+    y2 = getattr(ov_none.layout, "yaxis2", None)
+    assert getattr(y2, "overlaying", None) != "y"
+    assert plotting._figure_config(ov_none, stacked=False)["hasSecondaryAxis"] is False
+
+    # With a non-modulation native-units series (Kp) it is present.
+    ov_ext = build_overlay(dets, aligned, meta, rs.bin_mid_utc)
+    assert ov_ext.layout.yaxis2.overlaying == "y"
+    assert plotting._figure_config(ov_ext, stacked=False)["hasSecondaryAxis"] is True
+
+
 def test_write_combined_html_one_file_two_figs(tmp_path):
     from plotting import write_combined_html
     rs, corr, aligned, meta = make_inputs()
