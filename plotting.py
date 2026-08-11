@@ -251,7 +251,10 @@ def _add_gap_bands(fig: go.Figure, gaps, per_row: int = 1) -> None:
     )
 
 
+#: Event-mark ink per kind. Light is drawn into the figure by ``_add_event_marks``;
+#: the combined page re-selects the dark step client-side on a theme toggle.
 _EVENT_COLORS = {"cme": "#7b3fbf", "flare": "#d98324"}
+_EVENT_COLORS_DARK = {"cme": "#b085e0", "flare": "#e0a35a"}
 
 
 def _add_event_marks(fig: go.Figure, events: Optional[List[SolarEvent]],
@@ -840,6 +843,9 @@ _COMBINED_TEMPLATE = """<!DOCTYPE html>
   .muted { color:var(--secondary); font-size:12px; }
   .anomaly-ctl label { display:inline-flex; align-items:center; gap:6px;
     white-space:nowrap; cursor:pointer; }
+  .events-ctl label { display:inline-flex; align-items:center; gap:6px;
+    white-space:nowrap; cursor:pointer; }
+  #events-note { margin-left:12px; }
   #flagged-list { margin-top:6px; max-width:560px; line-height:1.6; }
   .run-header { margin:8px 4px 10px; color:var(--secondary); }
   .run-header > summary { cursor:pointer; font-size:17px; font-weight:700;
@@ -868,6 +874,7 @@ _COMBINED_TEMPLATE = """<!DOCTYPE html>
         step="0.01" style="width:5em" disabled></label>
     <span id="anomaly-readout" class="muted" style="margin-left:12px"></span>
     <div id="flagged-list" class="muted"></div></div>
+  __EVENTS_CONTROL__
 </div>
 <details class="run-header" open>
   <summary>__HEADER_TITLE__</summary>
@@ -958,8 +965,20 @@ _COMBINED_JS = """
     }
     if (cfg.hasSecondaryAxis) { lay["yaxis2.linecolor"] = t.axis; }
     cfg.annotationRoles.forEach(function (role, i) {
+      if (role === "event") { return; }  /* event marks recolored below */
       lay["annotations[" + i + "].font.color"] =
         role === "muted" ? t.muted : (role === "header" ? t.secondary : t.text);
+    });
+    /* Event marks (Task 5): recolor per kind for the current theme WITHOUT
+       touching their visibility -- only the checkbox drives that. */
+    var ec = (CFG.eventColors || {})[mode] || {};
+    (cfg.eventShapes || []).forEach(function (i, k) {
+      var c = ec[cfg.eventShapeKinds[k]];
+      if (c) { lay["shapes[" + i + "].line.color"] = c; }
+    });
+    (cfg.eventAnnotations || []).forEach(function (j, k) {
+      var c = ec[cfg.eventAnnotationKinds[k]];
+      if (c) { lay["annotations[" + j + "].font.color"] = c; }
     });
     Plotly.relayout(gd, lay);
     Plotly.restyle(gd, { "line.color": cfg.traceColors[mode],
@@ -1050,11 +1069,35 @@ _COMBINED_JS = """
     Plotly.Plots.resize(GD[view]);
     fitActive();
     applyAnomaly();  /* keep the newly-shown view's anomaly overlay correct */
+    applyEvents();   /* freshly-shown tab reflects the current toggle state */
   }
   document.getElementById("tab-overlay").addEventListener("click",
     function () { activate("overlay"); });
   document.getElementById("tab-side").addEventListener("click",
     function () { activate("side"); });
+
+  /* ---- solar events (both views) ------------------------------------ */
+  /* Flip every event-* shape/annotation to the checkbox state in both views
+     via relayout. Guarded so a view with no event marks is a no-op, and so
+     the whole feature is inert when the checkbox is absent. */
+  function applyEvents() {
+    var box = document.getElementById("events-toggle");
+    if (!box) { return; }
+    var on = box.checked;
+    VIEWS.forEach(function (v) {
+      var gd = GD[v], vw = CFG.views[v], lay = {};
+      (vw.eventShapes || []).forEach(function (i) {
+        lay["shapes[" + i + "].visible"] = on;
+      });
+      (vw.eventAnnotations || []).forEach(function (j) {
+        lay["annotations[" + j + "].visible"] = on;
+      });
+      if (Object.keys(lay).length) { Plotly.relayout(gd, lay); }
+    });
+  }
+
+  var _evBox = document.getElementById("events-toggle");
+  if (_evBox) { _evBox.addEventListener("change", applyEvents); }
 
   /* ---- anomaly detection (exact-Poisson, both views) ---------------- */
   function anomActive() {
@@ -1168,6 +1211,7 @@ _COMBINED_JS = """
   /* initial sizing of the active (overlay) view */
   fitActive();
   applyAnomaly();  /* set control state + keep hidden traces hidden on load */
+  applyEvents();   /* reflect the (default-off) checkbox on load */
 })();
 """
 
@@ -1214,6 +1258,20 @@ def _figure_config(fig: go.Figure, stacked: bool) -> dict:
         for ann in fig.layout.annotations
     ]
 
+    # Event marks (Task 4): hidden dotted line + top label per solar event,
+    # tagged name="event-<kind>". Collect their layout indices (and kinds, so
+    # the page can theme-recolor each mark by kind) for the toggle/theme JS.
+    event_shapes, event_shape_kinds = [], []
+    for i, s in enumerate(fig.layout.shapes):
+        if (s.name or "").startswith("event-"):
+            event_shapes.append(i)
+            event_shape_kinds.append(s.name[len("event-"):])
+    event_annotations, event_annotation_kinds = [], []
+    for j, ann in enumerate(fig.layout.annotations):
+        if (ann.name or "").startswith("event-"):
+            event_annotations.append(j)
+            event_annotation_kinds.append(ann.name[len("event-"):])
+
     units = "hz" if stacked else "pct"
     anomaly_by_det = {}
     marginal_by_det = {}
@@ -1243,6 +1301,11 @@ def _figure_config(fig: go.Figure, stacked: bool) -> dict:
         "units": units,
         "anomalyByDetector": [anomaly_by_det[d] for d in sorted(anomaly_by_det)],
         "marginalByDetector": [marginal_by_det[d] for d in sorted(marginal_by_det)],
+        "eventShapes": event_shapes,
+        "eventShapeKinds": event_shape_kinds,
+        "eventAnnotations": event_annotations,
+        "eventAnnotationKinds": event_annotation_kinds,
+        "eventShapeCount": len(event_shapes),
     }
 
 
@@ -1387,6 +1450,16 @@ def write_combined_html(
     header_title = fig_meta.get("header_title", "Muon Rate vs. Solar Activity")
     header_meta = fig_meta.get("header_meta", "")
 
+    # Solar events (Task 5): the checkbox appears when either figure carries
+    # event-* marks, or when events were requested but the window held none
+    # (meta["eventsRequested"], set by the caller) so the empty-window note can
+    # explain the absence.
+    has_events = any((s.name or "").startswith("event-")
+                     for s in overlay_fig.layout.shapes)
+    events_requested = bool(
+        overlay_fig.layout.meta
+        and overlay_fig.layout.meta.get("eventsRequested"))
+
     config = {
         "themes": _THEMES,
         "lineSpecs": {
@@ -1395,7 +1468,22 @@ def write_combined_html(
         },
         "views": {"overlay": ov_cfg, "side": sb_cfg},
         "detectorsAnomaly": anomaly or [],
+        "hasEvents": has_events,
+        "eventColors": {"light": _EVENT_COLORS, "dark": _EVENT_COLORS_DARK},
     }
+
+    if has_events or events_requested:
+        note = ("no CME/X-flare events in this window"
+                if (events_requested and not has_events) else "")
+        events_control = (
+            '<div class="events-ctl"><span class="ctl-label">Solar events</span>'
+            '<label><input type="checkbox" id="events-toggle"> '
+            'Show events (CME / X-flare)</label>'
+            '<span id="events-note" class="muted">{note}</span></div>'.format(
+                note=html.escape(note))
+        )
+    else:
+        events_control = ""
 
     checkboxes = "".join(
         '<label><input type="checkbox" checked data-i="{i}">'
@@ -1426,6 +1514,7 @@ def write_combined_html(
             .replace("__HEADER_META__", header_meta)
             .replace("__LINE_SPEC_OPTIONS__", options)
             .replace("__SERIES_CHECKBOXES__", checkboxes)
+            .replace("__EVENTS_CONTROL__", events_control)
             .replace("__PLOT_OVERLAY__", plot_overlay)
             .replace("__PLOT_SIDE__", plot_side)
             .replace("__NUMERICS_JS__", _anomaly_js_numerics())

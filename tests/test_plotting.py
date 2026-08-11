@@ -1226,3 +1226,130 @@ def test_side_by_side_event_line_spans_panels():
     ev = [s for s in fig.layout.shapes if (s.name or "").startswith("event-")]
     assert len(ev) == 2
     assert all(s.yref == "paper" and s.y0 == 0 and s.y1 == 1 for s in ev)
+
+
+# --- "Show events" checkbox: presence + config + headless toggle -----------
+
+
+def test_figure_config_collects_event_indices():
+    rs, corr, aligned, meta = make_inputs()
+    dets = [DetectorSeries("Muon rate", rs, corr)]
+    ov = build_overlay(dets, aligned, meta, rs.bin_mid_utc, events=_two_events())
+    cfg = plotting._figure_config(ov, stacked=False)
+    # Two events -> two event shapes + two event annotations, indices valid.
+    assert len(cfg["eventShapes"]) == 2
+    assert len(cfg["eventAnnotations"]) == 2
+    for i in cfg["eventShapes"]:
+        assert (ov.layout.shapes[i].name or "").startswith("event-")
+    for j in cfg["eventAnnotations"]:
+        assert (ov.layout.annotations[j].name or "").startswith("event-")
+    # No events -> empty index lists.
+    ov0 = build_overlay(dets, aligned, meta, rs.bin_mid_utc)
+    cfg0 = plotting._figure_config(ov0, stacked=False)
+    assert cfg0["eventShapes"] == [] and cfg0["eventAnnotations"] == []
+
+
+def test_combined_page_has_events_toggle_only_with_events(tmp_path):
+    rs, corr, aligned, meta = make_inputs()
+    dets = [DetectorSeries("Muon rate", rs, corr)]
+    ov = build_overlay(dets, aligned, meta, rs.bin_mid_utc, events=_two_events())
+    sb = build_side_by_side(dets, aligned, meta, rs.bin_mid_utc, events=_two_events())
+    out = tmp_path / "c.html"
+    plotting.write_combined_html(ov, sb, str(out))
+    assert 'id="events-toggle"' in out.read_text()
+
+    ov0 = build_overlay(dets, aligned, meta, rs.bin_mid_utc)   # no events
+    sb0 = build_side_by_side(dets, aligned, meta, rs.bin_mid_utc)
+    out0 = tmp_path / "c0.html"
+    plotting.write_combined_html(ov0, sb0, str(out0))
+    assert 'id="events-toggle"' not in out0.read_text()
+
+
+def test_combined_page_events_requested_but_none_shows_note(tmp_path):
+    """When events were requested but the window held none, the checkbox still
+    renders (with the empty-window note) so the viewer knows the query ran."""
+    rs, corr, aligned, meta = make_inputs()
+    dets = [DetectorSeries("Muon rate", rs, corr)]
+    ov = build_overlay(dets, aligned, meta, rs.bin_mid_utc)  # no events drawn
+    sb = build_side_by_side(dets, aligned, meta, rs.bin_mid_utc)
+    ov.layout.meta = dict(ov.layout.meta or {})
+    ov.layout.meta["eventsRequested"] = True
+    out = tmp_path / "c.html"
+    plotting.write_combined_html(ov, sb, str(out))
+    content = out.read_text()
+    assert 'id="events-toggle"' in content
+    assert "no CME/X-flare events in this window" in content
+
+
+def test_headless_events_toggle_shows_lines(tmp_path):
+    """Render the combined page with two events, click #events-toggle on, and
+    read back that every event-* shape reports visible===true in BOTH graph
+    divs; toggling off returns them all to visible===false. Skip if no Chrome."""
+    import re
+    import subprocess
+
+    chrome = _find_chrome_binary()
+    if chrome is None:
+        pytest.skip("no local Chrome/Chromium binary found for headless check")
+
+    rs, corr, aligned, meta = make_inputs()
+    dets = [DetectorSeries("Muon rate", rs, corr)]
+    ov = build_overlay(dets, aligned, meta, rs.bin_mid_utc, events=_two_events())
+    sb = build_side_by_side(dets, aligned, meta, rs.bin_mid_utc, events=_two_events())
+
+    out = tmp_path / "combined_events.html"
+    plotting.write_combined_html(ov, sb, str(out))
+
+    probe_js = """
+<script>
+(function () {
+  function evStates() {
+    var rows = [];
+    ["overlay", "side"].forEach(function (view) {
+      var gd = document.getElementById("viz-" + view)
+        .querySelector(".plotly-graph-div");
+      (gd.layout.shapes || []).forEach(function (s) {
+        if (s.name && s.name.indexOf("event-") === 0) {
+          rows.push(view + ":" + String(s.visible));
+        }
+      });
+    });
+    return rows;
+  }
+  function run() {
+    var box = document.getElementById("events-toggle");
+    box.checked = true; box.dispatchEvent(new Event("change", { bubbles: true }));
+    var onRows = evStates();
+    box.checked = false; box.dispatchEvent(new Event("change", { bubbles: true }));
+    var offRows = evStates();
+    var pre = document.createElement("pre");
+    pre.id = "probe";
+    pre.textContent = JSON.stringify({ on: onRows, off: offRows });
+    document.body.appendChild(pre);
+  }
+  if (document.readyState === "complete") { setTimeout(run, 700); }
+  else { window.addEventListener("load", function () { setTimeout(run, 700); }); }
+})();
+</script>
+"""
+    content = out.read_text().replace("</body>", probe_js + "\n</body>")
+    out.write_text(content)
+
+    result = subprocess.run(
+        [chrome, "--headless=new", "--disable-gpu", "--no-sandbox",
+         "--virtual-time-budget=6000", "--dump-dom", f"file://{out}"],
+        capture_output=True, text=True, timeout=60,
+    )
+    m = re.search(r'<pre id="probe">(.*?)</pre>', result.stdout, re.S)
+    assert m, (f"probe not found (rc={result.returncode}, "
+               f"stderr={result.stderr[-2000:]})")
+    data = json.loads(m.group(1))
+    # Two events x two views = four event shapes, all visible when toggled on.
+    assert len(data["on"]) == 4, data
+    assert all(r.endswith(":true") for r in data["on"]), data["on"]
+    assert any(r.startswith("overlay:") for r in data["on"]), data["on"]
+    assert any(r.startswith("side:") for r in data["on"]), data["on"]
+    # Toggling off returns every event shape to hidden in both views.
+    assert len(data["off"]) == 4, data
+    for r in data["off"]:
+        assert r.endswith(":false"), r
