@@ -33,6 +33,7 @@ from plotly.subplots import make_subplots
 import anomaly
 from align import AlignedSeries
 from correction import CorrectionResult
+from external_sources import SolarEvent
 from rate import RateSeries
 
 #: Sources shown as percent deviation in overlay mode (cosmic-ray flux proxies).
@@ -250,6 +251,31 @@ def _add_gap_bands(fig: go.Figure, gaps, per_row: int = 1) -> None:
     )
 
 
+_EVENT_COLORS = {"cme": "#7b3fbf", "flare": "#d98324"}
+
+
+def _add_event_marks(fig: go.Figure, events: Optional[List[SolarEvent]],
+                     xref: str = "x") -> None:
+    """Draw a hidden dotted vertical line + top label for each solar event.
+
+    Shapes/annotations are added disabled (``visible=False``); a later task
+    wires up the client-side toggle. ``events=None``/empty -> nothing drawn.
+    """
+    if not events:
+        return
+    for ev in events:
+        color = _EVENT_COLORS.get(ev.kind, _MUTED_INK)
+        tag = "event-" + ev.kind
+        x = str(np.datetime64(ev.utc, "us"))
+        fig.add_shape(type="line", xref=xref, yref="paper",
+                      x0=x, x1=x, y0=0, y1=1, name=tag, visible=False,
+                      line=dict(color=color, width=1, dash="dot"))
+        fig.add_annotation(xref=xref, yref="paper", x=x, y=1.01,
+                           text=ev.label, name=tag, visible=False,
+                           showarrow=False, font=dict(color=color, size=10),
+                           textangle=-90, yanchor="bottom")
+
+
 def build_anomaly_payload(detectors: List[DetectorSeries]) -> List[dict]:
     """Per-detector JSON-able payload for client-side anomaly re-thresholding.
 
@@ -405,6 +431,7 @@ def build_overlay(
     meta: PlotMetadata,
     master_utc: np.ndarray,
     gaps: Optional[List[Tuple[np.datetime64, np.datetime64]]] = None,
+    events: Optional[List[SolarEvent]] = None,
 ) -> go.Figure:
     """One shared time axis; each detector as percent deviation, external on
     the secondary axis (plotted at the shared master grid)."""
@@ -480,6 +507,7 @@ def build_overlay(
                                 linecolor=_MUTED_INK)
     fig.update_layout(**layout)
     _add_gap_bands(fig, gaps)
+    _add_event_marks(fig, events)
     _apply_common_layout(fig, meta, "Muon Rate vs. Solar Activity — Overlay",
                          plot_height=460, bottom_margin=120)
     return fig
@@ -491,6 +519,7 @@ def build_side_by_side(
     meta: PlotMetadata,
     master_utc: np.ndarray,
     gaps: Optional[List[Tuple[np.datetime64, np.datetime64]]] = None,
+    events: Optional[List[SolarEvent]] = None,
 ) -> go.Figure:
     """One rate panel (all detectors overlaid) plus one panel per external
     source, sharing a linked time axis."""
@@ -554,6 +583,7 @@ def build_side_by_side(
     })
     fig.update_layout(showlegend=False, barmode="overlay")
     _add_gap_bands(fig, gaps, per_row=n_rows)
+    _add_event_marks(fig, events, xref="x")
     _apply_common_layout(fig, meta,
                          "Muon Rate vs. Solar Activity — Aligned Panels",
                          plot_height=max(240 * n_rows, 480))
@@ -1178,7 +1208,9 @@ def _figure_config(fig: go.Figure, stacked: bool) -> dict:
         row_of_trace = [1] * n_primary
     n_rows = (1 + (n_primary - n_detectors)) if stacked else 1
     annotation_roles = [
-        "muted" if (ann.name == "gap-label" or ann.text == "no data") else "subplot"
+        "muted" if (ann.name == "gap-label" or ann.text == "no data")
+        else "event" if (ann.name or "").startswith("event-")
+        else "subplot"
         for ann in fig.layout.annotations
     ]
 

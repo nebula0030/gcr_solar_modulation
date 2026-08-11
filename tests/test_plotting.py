@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 
 import anomaly
+import external_sources as es
 import plotting
 from align import AlignedSeries
 from correction import CorrectionResult
@@ -1165,3 +1166,40 @@ def test_headless_toggle_shows_lines_and_flags(tmp_path):
     assert "DetA" in res["listText"], res["listText"]
     assert res["overlayVisible"] is True, res
     assert res["sideVisible"] is True, res
+
+
+def _two_events():
+    return [
+        es.SolarEvent("cme", np.datetime64("2026-07-10T12:00:00"), "CME"),
+        es.SolarEvent("flare", np.datetime64("2026-07-11T03:00:00"), "X1.5"),
+    ]
+
+
+def test_overlay_adds_hidden_event_shapes_and_annotations():
+    rs, corr, aligned, meta = make_inputs()
+    dets = [DetectorSeries("Muon rate", rs, corr)]
+    fig = build_overlay(dets, aligned, meta, rs.bin_mid_utc, events=_two_events())
+    ev_shapes = [s for s in fig.layout.shapes
+                 if (s.name or "").startswith("event-")]
+    ev_anns = [a for a in fig.layout.annotations
+               if (a.name or "").startswith("event-")]
+    assert len(ev_shapes) == 2 and len(ev_anns) == 2
+    assert all(s.visible is False for s in ev_shapes)
+    assert all(s.yref == "paper" for s in ev_shapes)
+
+
+def test_events_none_adds_nothing():
+    rs, corr, aligned, meta = make_inputs()
+    dets = [DetectorSeries("Muon rate", rs, corr)]
+    fig = build_overlay(dets, aligned, meta, rs.bin_mid_utc)  # events default None
+    assert not any((s.name or "").startswith("event-") for s in fig.layout.shapes)
+
+
+def test_side_by_side_event_line_spans_panels():
+    rs, corr, aligned, meta = make_inputs()
+    dets = [DetectorSeries("Muon rate", rs, corr)]
+    fig = build_side_by_side(dets, aligned, meta, rs.bin_mid_utc,
+                             events=_two_events())
+    ev = [s for s in fig.layout.shapes if (s.name or "").startswith("event-")]
+    assert len(ev) == 2
+    assert all(s.yref == "paper" and s.y0 == 0 and s.y1 == 1 for s in ev)
