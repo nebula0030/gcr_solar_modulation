@@ -2,7 +2,9 @@
 
 Every fetcher shares one shape -- given a UTC window it returns an
 ``ExternalSeries`` -- and every network read goes through ``Cache`` so repeat
-runs and offline work do not hit the network.
+runs and offline work do not hit the network. Exception: ``fetch_solar_events``
+only caches its DONKI reads when a ``cache`` is supplied, since ``cache`` is
+optional there.
 
 All endpoints below were verified live on 2026-07-21. Two carry traps worth
 stating explicitly:
@@ -604,10 +606,18 @@ def fetch_solar_events(
     key = api_key or os.environ.get("NASA_API_KEY") or "DEMO_KEY"
     s = str(np.datetime64(start_utc, "D"))
     e = str(np.datetime64(end_utc, "D"))
-    flr = http_get(_DONKI + "/FLR",
-                   params={"startDate": s, "endDate": e, "api_key": key})
-    cme = http_get(_DONKI + "/CME",
-                   params={"startDate": s, "endDate": e, "api_key": key})
+
+    def _get(url, params, cache_key):
+        if cache is not None:
+            return cache.get_or_fetch(cache_key, lambda: http_get(url, params=params))
+        return http_get(url, params=params)
+
+    flr = _get(_DONKI + "/FLR",
+               {"startDate": s, "endDate": e, "api_key": key},
+               "donki-flr|{0}|{1}".format(s, e))
+    cme = _get(_DONKI + "/CME",
+               {"startDate": s, "endDate": e, "api_key": key},
+               "donki-cme|{0}|{1}".format(s, e))
     events = (parse_donki_flares(flr, np.datetime64(start_utc),
                                   np.datetime64(end_utc))
               + parse_donki_cme(cme, np.datetime64(start_utc),

@@ -39,6 +39,28 @@ def test_parse_cme_keeps_earth_directed_arrival():
     assert evs[0].utc == np.datetime64("2026-08-12T06:00")
 
 
+def test_parse_cme_drops_non_earth_directed_even_with_arrival():
+    payload = json.dumps([
+        {"cmeAnalyses": [
+            {"isMostAccurate": True, "enlilList": [
+                {"isEarthGB": False,
+                 "estimatedShockArrivalTime": "2026-08-12T06:00Z"}]}]},
+    ]).encode()
+    evs = es.parse_donki_cme(payload, START, END)
+    assert evs == []
+
+
+def test_parse_flares_window_boundaries_inclusive():
+    before_start = START - np.timedelta64(1, "s")
+    payload = json.dumps([
+        {"classType": "X1.0", "peakTime": str(START) + "Z"},
+        {"classType": "X2.0", "peakTime": str(END) + "Z"},
+        {"classType": "X3.0", "peakTime": str(before_start) + "Z"},
+    ]).encode()
+    evs = es.parse_donki_flares(payload, START, END)
+    assert [e.label for e in evs] == ["X1.0", "X2.0"]
+
+
 def test_fetch_solar_events_propagates_fetcherror(monkeypatch):
     def boom(*a, **k):
         raise es.FetchError("offline")
