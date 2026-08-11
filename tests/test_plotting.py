@@ -353,6 +353,29 @@ def test_gap_label_is_classified_muted_so_theme_toggle_does_not_recolor_it(tmp_p
     assert "no data" in content
 
 
+def test_annotation_roles_tags_events_and_keeps_gap_label_muted():
+    """Event annotations must be tagged "event" even when their (unvalidated,
+    external DONKI) label text happens to collide with the gap-label's "no
+    data" text -- the event- name check must win over the muted fallback."""
+    rs, corr, aligned, meta = make_inputs()
+    dets = [DetectorSeries("Muon rate", rs, corr)]
+    gaps = [(np.datetime64("2026-07-10T02:00:00"),
+             np.datetime64("2026-07-10T03:00:00"))]
+    events = [es.SolarEvent("cme", np.datetime64("2026-07-10T12:00:00"), "no data"),
+              es.SolarEvent("flare", np.datetime64("2026-07-10T15:00:00"), "X1.5")]
+    fig = build_overlay(dets, aligned, meta, rs.bin_mid_utc, gaps=gaps, events=events)
+    roles = plotting._figure_config(fig, stacked=False)["annotationRoles"]
+
+    assert len(roles) == len(fig.layout.annotations)  # index-parallel
+    for role, ann in zip(roles, fig.layout.annotations):
+        if (ann.name or "").startswith("event-"):
+            assert role == "event"
+        elif ann.name == "gap-label":
+            assert role == "muted"
+    assert roles.count("event") == 2
+    assert "muted" in roles  # the gap label is still muted
+
+
 def test_figure_config_shapes_for_overlay_and_side():
     from plotting import _figure_config
     rs, corr, aligned, meta = make_inputs()

@@ -266,7 +266,7 @@ def _add_event_marks(fig: go.Figure, events: Optional[List[SolarEvent]],
     for ev in events:
         color = _EVENT_COLORS.get(ev.kind, _MUTED_INK)
         tag = "event-" + ev.kind
-        x = str(np.datetime64(ev.utc, "us"))
+        x = _iso(ev.utc)
         fig.add_shape(type="line", xref=xref, yref="paper",
                       x0=x, x1=x, y0=0, y1=1, name=tag, visible=False,
                       line=dict(color=color, width=1, dash="dot"))
@@ -1208,8 +1208,8 @@ def _figure_config(fig: go.Figure, stacked: bool) -> dict:
         row_of_trace = [1] * n_primary
     n_rows = (1 + (n_primary - n_detectors)) if stacked else 1
     annotation_roles = [
-        "muted" if (ann.name == "gap-label" or ann.text == "no data")
-        else "event" if (ann.name or "").startswith("event-")
+        "event" if (ann.name or "").startswith("event-")
+        else "muted" if (ann.name == "gap-label" or ann.text == "no data")
         else "subplot"
         for ann in fig.layout.annotations
     ]
