@@ -14,6 +14,7 @@ stating explicitly:
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 from dataclasses import dataclass
@@ -526,3 +527,90 @@ def fetch_goes_xray(
         utc=times[inside],
         values=values[inside],
     )
+
+
+# --------------------------------------------------------------------------
+# Solar events (NASA DONKI): CME arrivals and X-class flares
+# --------------------------------------------------------------------------
+
+DONKI_ACKNOWLEDGEMENT = (
+    "Solar events (CME/flare) courtesy of the NASA CCMC DONKI database "
+    "(https://kauai.ccmc.gsfc.nasa.gov/DONKI/).")
+_DONKI = "https://api.nasa.gov/DONKI"
+
+
+@dataclass
+class SolarEvent:
+    """A single solar-activity event to mark on a plot."""
+
+    kind: str            # "cme" | "flare"
+    utc: np.datetime64
+    label: str
+
+
+def _donki_time(s):
+    # "2026-08-11T14:24Z" -> np.datetime64("2026-08-11T14:24")
+    return np.datetime64(str(s).replace("Z", ""))
+
+
+def parse_donki_flares(payload: bytes, start, end) -> List[SolarEvent]:
+    """Parse DONKI FLR JSON, keeping only X-class flares within the window."""
+    out = []
+    for f in json.loads(payload):
+        cls = f.get("classType") or ""
+        peak = f.get("peakTime") or f.get("beginTime")
+        if not cls.startswith("X") or not peak:
+            continue
+        t = _donki_time(peak)
+        if start <= t <= end:
+            out.append(SolarEvent("flare", t, cls))
+    return out
+
+
+def parse_donki_cme(payload: bytes, start, end) -> List[SolarEvent]:
+    """Parse DONKI CME JSON, keeping the most-accurate Earth-directed arrival."""
+    out = []
+    for c in json.loads(payload):
+        analyses = c.get("cmeAnalyses") or []
+        # most-accurate first, then any
+        analyses = sorted(analyses, key=lambda a: not a.get("isMostAccurate"))
+        arrival = None
+        for a in analyses:
+            for e in (a.get("enlilList") or []):
+                if e.get("isEarthGB") and e.get("estimatedShockArrivalTime"):
+                    arrival = e["estimatedShockArrivalTime"]
+                    break
+            if arrival:
+                break
+        if not arrival:
+            continue
+        t = _donki_time(arrival)
+        if start <= t <= end:
+            out.append(SolarEvent("cme", t, "CME"))
+    return out
+
+
+def fetch_solar_events(
+    start_utc: np.datetime64,
+    end_utc: np.datetime64,
+    api_key: str | None = None,
+    cache: Cache | None = None,
+) -> List[SolarEvent]:
+    """Fetch X-class flares and Earth-directed CME arrivals from DONKI.
+
+    Any ``FetchError`` from ``http_get`` propagates to the caller so it can
+    be handled (or failed soft) by the caller.
+    """
+    key = api_key or os.environ.get("NASA_API_KEY") or "DEMO_KEY"
+    s = str(np.datetime64(start_utc, "D"))
+    e = str(np.datetime64(end_utc, "D"))
+    flr = http_get(_DONKI + "/FLR",
+                   params={"startDate": s, "endDate": e, "api_key": key})
+    cme = http_get(_DONKI + "/CME",
+                   params={"startDate": s, "endDate": e, "api_key": key})
+    events = (parse_donki_flares(flr, np.datetime64(start_utc),
+                                  np.datetime64(end_utc))
+              + parse_donki_cme(cme, np.datetime64(start_utc),
+                                 np.datetime64(end_utc)))
+    events.sort(key=lambda ev: ev.utc)
+    return events
