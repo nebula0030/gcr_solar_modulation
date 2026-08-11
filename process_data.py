@@ -18,6 +18,7 @@ from typing import Callable, List, Optional, Tuple
 
 import numpy as np
 
+import correlation
 from align import AlignedSeries, align_to_bins
 from correction import CorrectionError, CorrectionResult, correct
 from cosmicwatch_io import DataFormatError, Events
@@ -644,6 +645,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         "Time range (UTC): {0} to {1}".format(master_start[0], master_end_utc),
         "External sources requested: {0}".format(requested_sources),
     ]
+    nmdb_aligned = next((s for s in aligned if s.source == "NMDB"), None)
     for det_name, det_paths, det_correction, _ev, det_rs in per_detector_report:
         files = ", ".join(os.path.basename(p) for p in det_paths)
         if det_correction.method == "fit":
@@ -657,6 +659,21 @@ def main(argv: Optional[List[str]] = None) -> int:
                 det_name, files, len(det_rs.counts),
                 det_rs.mean_fractional_error * 100.0, coeff)
         )
+        if nmdb_aligned is not None:
+            cres = correlation.pearson_muon_nmdb(
+                det_correction.corrected_rate_hz, det_rs.bin_mid_utc,
+                nmdb_aligned.values, nmdb_aligned.interpolated, master_mid,
+                nmdb_aligned.name)
+        else:
+            cres = correlation.CorrelationResult(None, 0, "NMDB", "NMDB not loaded")
+        if cres.r is None:
+            header_lines.append(
+                "Cross-correlation with {0}: n/a ({1})".format(
+                    cres.nmdb_name, cres.reason))
+        else:
+            header_lines.append(
+                "Cross-correlation with {0}: r = {1:+.2f} (n = {2} bins)".format(
+                    cres.nmdb_name, cres.r, cres.n))
     for w in met_warnings:
         header_lines.append("Note: " + w)
 

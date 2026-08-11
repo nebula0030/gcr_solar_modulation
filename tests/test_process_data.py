@@ -546,6 +546,67 @@ def test_two_different_detector_files_stack_on_one_page(tmp_path):
     assert produced[0].startswith("sample_13col_+1more")
 
 
+# ---------------------------------------------------------------------------
+# Cross-correlation line in the header
+# ---------------------------------------------------------------------------
+
+
+def test_header_shows_na_cross_correlation_when_nmdb_not_loaded(tmp_path):
+    """With no external sources requested at all, the NMDB aligned series
+    never exists, so the header must say so explicitly rather than silently
+    omitting the line.
+    """
+    path = os.path.join(FIXTURES, "sample_13col.txt")
+    code = main([
+        path, "--bin-length", "2",
+        "--correction-method", "literature", "--beta-p", "-0.13",
+        "--sources", "",
+        "--output-dir", str(tmp_path),
+        "--cache-dir", str(tmp_path / "cache"),
+    ])
+    assert code == 0
+    content = (tmp_path / "sample_13col.html").read_text()
+    assert "Cross-correlation with NMDB: n/a (NMDB not loaded)" in content
+
+
+def test_header_shows_cross_correlation_r_when_nmdb_loaded(tmp_path, monkeypatch):
+    """With a real (stubbed, offline) NMDB series in play, the header must
+    show a computed r rather than the n/a fallback.
+    """
+
+    def fake_fetch_nmdb(start, end, station_code, bin_length_s, cache):
+        # A dense, varying synthetic series spanning the run window, so
+        # every master bin gets a native (non-interpolated) sample and a
+        # real Pearson r can be computed rather than "insufficient overlap".
+        n = 200
+        total_ns = (end - start).astype("timedelta64[ns]").astype(np.int64)
+        step_ns = max(total_ns // (n - 1), 1)
+        utc = start + (np.arange(n) * step_ns).astype("timedelta64[ns]")
+        values = np.linspace(80.0, 120.0, n)
+        return ExternalSeries(
+            name="Neutron monitor ({0})".format(station_code),
+            units="counts/s",
+            source="NMDB",
+            utc=utc,
+            values=values,
+        )
+
+    monkeypatch.setattr(process_data, "fetch_nmdb", fake_fetch_nmdb)
+
+    path = os.path.join(FIXTURES, "sample_13col.txt")
+    code = main([
+        path, "--bin-length", "0.5",
+        "--correction-method", "literature", "--beta-p", "-0.13",
+        "--sources", "nmdb",
+        "--output-dir", str(tmp_path),
+        "--cache-dir", str(tmp_path / "cache"),
+    ])
+    assert code == 0
+    content = (tmp_path / "sample_13col.html").read_text()
+    assert "Cross-correlation with" in content
+    assert "r = " in content
+
+
 def test_summary_mean_raw_rate_is_finite_when_a_bin_is_dead():
     rs = _rate_series_with_one_dead_bin()
     assert np.isnan(rs.rate_hz).any()  # sanity: the scenario actually has a dead bin
