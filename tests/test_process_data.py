@@ -297,9 +297,11 @@ def test_main_falls_back_and_reports_the_station_actually_used(
     captured_meta = {}
     real_build_overlay = process_data.build_overlay
 
-    def spy_build_overlay(detectors, aligned, meta, master_utc, gaps=None):
+    def spy_build_overlay(detectors, aligned, meta, master_utc, gaps=None,
+                          events=None):
         captured_meta["meta"] = meta
-        return real_build_overlay(detectors, aligned, meta, master_utc, gaps=gaps)
+        return real_build_overlay(detectors, aligned, meta, master_utc,
+                                  gaps=gaps, events=events)
 
     monkeypatch.setattr(process_data, "build_overlay", spy_build_overlay)
 
@@ -634,3 +636,74 @@ def test_summary_mean_raw_rate_is_finite_when_a_bin_is_dead():
     assert "nan" not in mean_line.lower()
     # np.nanmean([1.0, 1.2, 0.9]) == 1.0333...
     assert "1.0333" in mean_line
+
+
+# --- --events CLI wiring (Task 6) -------------------------------------------
+
+
+def test_events_flag_off_makes_no_donki_call(tmp_path, monkeypatch):
+    import external_sources
+
+    def boom(*a, **k):
+        raise AssertionError("fetch_solar_events must not run")
+
+    monkeypatch.setattr(external_sources, "fetch_solar_events", boom)
+
+    path = os.path.join(FIXTURES, "sample_13col.txt")
+    code = main([
+        path, "--bin-length", "2",
+        "--correction-method", "literature", "--beta-p", "-0.13",
+        "--sources", "",
+        "--output-dir", str(tmp_path),
+        "--cache-dir", str(tmp_path / "cache"),
+    ])
+    assert code == 0
+    content = (tmp_path / "sample_13col.html").read_text()
+    assert 'id="events-toggle"' not in content
+
+
+def test_events_flag_on_fetches_and_passes(tmp_path, monkeypatch):
+    import external_sources
+    import numpy as np
+
+    monkeypatch.setattr(
+        external_sources, "fetch_solar_events",
+        lambda *a, **k: [external_sources.SolarEvent(
+            "flare", np.datetime64("2026-07-10T00:00:02"), "X1.0")])
+
+    path = os.path.join(FIXTURES, "sample_13col.txt")
+    code = main([
+        path, "--bin-length", "2",
+        "--correction-method", "literature", "--beta-p", "-0.13",
+        "--sources", "",
+        "--events",
+        "--output-dir", str(tmp_path),
+        "--cache-dir", str(tmp_path / "cache"),
+    ])
+    assert code == 0
+    content = (tmp_path / "sample_13col.html").read_text()
+    assert 'id="events-toggle"' in content
+
+
+def test_events_flag_fetch_failure_is_fail_soft(tmp_path, monkeypatch):
+    import external_sources
+
+    def raise_fetch_error(*a, **k):
+        raise external_sources.FetchError("offline")
+
+    monkeypatch.setattr(external_sources, "fetch_solar_events", raise_fetch_error)
+
+    path = os.path.join(FIXTURES, "sample_13col.txt")
+    code = main([
+        path, "--bin-length", "2",
+        "--correction-method", "literature", "--beta-p", "-0.13",
+        "--sources", "",
+        "--events",
+        "--output-dir", str(tmp_path),
+        "--cache-dir", str(tmp_path / "cache"),
+    ])
+    assert code == 0
+    content = (tmp_path / "sample_13col.html").read_text()
+    assert "Unavailable" in content
+    assert "solar events" in content
+    assert 'id="events-toggle"' not in content

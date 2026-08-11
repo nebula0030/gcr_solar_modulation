@@ -1218,6 +1218,25 @@ def test_events_none_adds_nothing():
     assert not any((s.name or "").startswith("event-") for s in fig.layout.shapes)
 
 
+def test_events_requested_meta_merges_with_header_meta():
+    """eventsRequested must not clobber the header_title/header_meta stashed
+    by _apply_common_layout -- update_layout(meta=...) replaces the dict
+    wholesale rather than merging it, so the builder must merge by hand."""
+    rs, corr, aligned, meta = make_inputs()
+    dets = [DetectorSeries("Muon rate", rs, corr)]
+    fig = build_overlay(dets, aligned, meta, rs.bin_mid_utc, events=_two_events())
+    assert fig.layout.meta.get("eventsRequested") is True
+    assert fig.layout.meta.get("header_title")
+
+    fig_none = build_overlay(dets, aligned, meta, rs.bin_mid_utc)
+    assert not fig_none.layout.meta.get("eventsRequested")
+
+    sb = build_side_by_side(dets, aligned, meta, rs.bin_mid_utc,
+                            events=_two_events())
+    assert sb.layout.meta.get("eventsRequested") is True
+    assert sb.layout.meta.get("header_title")
+
+
 def test_side_by_side_event_line_spans_panels():
     rs, corr, aligned, meta = make_inputs()
     dets = [DetectorSeries("Muon rate", rs, corr)]

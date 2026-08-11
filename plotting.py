@@ -513,6 +513,11 @@ def build_overlay(
     _add_event_marks(fig, events)
     _apply_common_layout(fig, meta, "Muon Rate vs. Solar Activity — Overlay",
                          plot_height=460, bottom_margin=120)
+    if events is not None:
+        # ``update_layout(meta=...)`` replaces the whole dict rather than
+        # deep-merging it, so the header_title/header_meta stashed by
+        # _apply_common_layout must be carried forward explicitly.
+        fig.update_layout(meta=dict(fig.layout.meta or {}, eventsRequested=True))
     return fig
 
 
@@ -590,6 +595,8 @@ def build_side_by_side(
     _apply_common_layout(fig, meta,
                          "Muon Rate vs. Solar Activity — Aligned Panels",
                          plot_height=max(240 * n_rows, 480))
+    if events is not None:
+        fig.update_layout(meta=dict(fig.layout.meta or {}, eventsRequested=True))
     return fig
 
 

@@ -19,6 +19,7 @@ from typing import Callable, List, Optional, Tuple
 import numpy as np
 
 import correlation
+import external_sources
 from align import AlignedSeries, align_to_bins
 from correction import CorrectionError, CorrectionResult, correct
 from cosmicwatch_io import DataFormatError, Events
@@ -109,6 +110,9 @@ def build_parser() -> argparse.ArgumentParser:
     ext.add_argument("--sources", default=",".join(ALL_SOURCES),
                      help="comma-separated subset of %s (default: all)"
                           % ",".join(ALL_SOURCES))
+    ext.add_argument("--events", action="store_true",
+                     help="mark DONKI CME arrivals and X-class flares as "
+                          "vertical lines")
 
     cache_group = parser.add_argument_group("cache")
     cache_group.add_argument("--cache-dir", default="cache",
@@ -635,6 +639,17 @@ def main(argv: Optional[List[str]] = None) -> int:
     footer_notes.extend("Note: " + n for n in notes)
     footer_notes.extend("Unavailable - " + w for w in warnings)
 
+    events = None
+    if args.events:
+        try:
+            events = external_sources.fetch_solar_events(
+                master_start[0], master_end_utc, cache=cache)
+            footer_notes.append(external_sources.DONKI_ACKNOWLEDGEMENT)
+        except external_sources.FetchError as exc:
+            events = None
+            footer_notes.append(
+                "Unavailable - solar events: {0}".format(exc))
+
     requested_sources = ", ".join(
         s.strip() for s in args.sources.split(",") if s.strip()
     ) or "none"
@@ -689,8 +704,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     combined_path = os.path.join(output_dir, run_name + ".html")
     anomaly_payload = build_anomaly_payload(detectors)
     write_combined_html(
-        build_overlay(detectors, aligned, meta, master_mid, gaps=gaps),
-        build_side_by_side(detectors, aligned, meta, master_mid, gaps=gaps),
+        build_overlay(detectors, aligned, meta, master_mid, gaps=gaps,
+                     events=events),
+        build_side_by_side(detectors, aligned, meta, master_mid, gaps=gaps,
+                           events=events),
         combined_path, anomaly=anomaly_payload,
     )
     print("Wrote {0}".format(combined_path))
