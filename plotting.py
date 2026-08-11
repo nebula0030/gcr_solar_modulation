@@ -1450,10 +1450,12 @@ def write_combined_html(
     header_title = fig_meta.get("header_title", "Muon Rate vs. Solar Activity")
     header_meta = fig_meta.get("header_meta", "")
 
-    # Solar events (Task 5): the checkbox appears when either figure carries
-    # event-* marks, or when events were requested but the window held none
-    # (meta["eventsRequested"], set by the caller) so the empty-window note can
-    # explain the absence.
+    # Solar events (Task 5): the checkbox appears when the overlay figure
+    # carries event-* marks, or when events were requested but the window
+    # held none (meta["eventsRequested"], set by the caller) so the
+    # empty-window note can explain the absence. Only overlay_fig is checked:
+    # both figures are built from the same single call site and always
+    # receive identical events, so overlay is representative of side_fig too.
     has_events = any((s.name or "").startswith("event-")
                      for s in overlay_fig.layout.shapes)
     events_requested = bool(

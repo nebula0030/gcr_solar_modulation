@@ -1305,6 +1305,7 @@ def test_headless_events_toggle_shows_lines(tmp_path):
 (function () {
   function evStates() {
     var rows = [];
+    var annRows = [];
     ["overlay", "side"].forEach(function (view) {
       var gd = document.getElementById("viz-" + view)
         .querySelector(".plotly-graph-div");
@@ -1313,18 +1314,26 @@ def test_headless_events_toggle_shows_lines(tmp_path):
           rows.push(view + ":" + String(s.visible));
         }
       });
+      (gd.layout.annotations || []).forEach(function (a) {
+        if (a.name && a.name.indexOf("event-") === 0) {
+          annRows.push(view + ":" + String(a.visible));
+        }
+      });
     });
-    return rows;
+    return { shapes: rows, annotations: annRows };
   }
   function run() {
     var box = document.getElementById("events-toggle");
     box.checked = true; box.dispatchEvent(new Event("change", { bubbles: true }));
-    var onRows = evStates();
+    var onStates = evStates();
     box.checked = false; box.dispatchEvent(new Event("change", { bubbles: true }));
-    var offRows = evStates();
+    var offStates = evStates();
     var pre = document.createElement("pre");
     pre.id = "probe";
-    pre.textContent = JSON.stringify({ on: onRows, off: offRows });
+    pre.textContent = JSON.stringify({
+      on: onStates.shapes, off: offStates.shapes,
+      onAnn: onStates.annotations, offAnn: offStates.annotations
+    });
     document.body.appendChild(pre);
   }
   if (document.readyState === "complete") { setTimeout(run, 700); }
@@ -1352,4 +1361,14 @@ def test_headless_events_toggle_shows_lines(tmp_path):
     # Toggling off returns every event shape to hidden in both views.
     assert len(data["off"]) == 4, data
     for r in data["off"]:
+        assert r.endswith(":false"), r
+    # Same two assertions, but for the event-* ANNOTATIONS (labels), which a
+    # regression in applyEvents()'s annotation branch (or the theme recolor)
+    # could silently leave stuck at their initial visible=False.
+    assert len(data["onAnn"]) == 4, data
+    assert all(r.endswith(":true") for r in data["onAnn"]), data["onAnn"]
+    assert any(r.startswith("overlay:") for r in data["onAnn"]), data["onAnn"]
+    assert any(r.startswith("side:") for r in data["onAnn"]), data["onAnn"]
+    assert len(data["offAnn"]) == 4, data
+    for r in data["offAnn"]:
         assert r.endswith(":false"), r
