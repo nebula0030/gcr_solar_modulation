@@ -1218,6 +1218,28 @@ def test_events_none_adds_nothing():
     assert not any((s.name or "").startswith("event-") for s in fig.layout.shapes)
 
 
+def test_event_labels_are_decluttered_and_pick_the_strongest():
+    """Many/clustered events must keep one line each but collapse their labels
+    so they stay readable; the strongest flare in a cluster gets the label
+    (with +N for the events it stands in for), not whichever came first."""
+    rs, corr, aligned, meta = make_inputs()
+    dets = [DetectorSeries("Muon rate", rs, corr)]
+    base = np.datetime64("2026-02-01T00:00:00")
+    events = [
+        es.SolarEvent("flare", base + np.timedelta64(1, "h"), "X1.0"),
+        es.SolarEvent("flare", base + np.timedelta64(5, "h"), "X8.1"),  # strongest
+        es.SolarEvent("cme", base + np.timedelta64(9, "h"), "CME"),
+        es.SolarEvent("cme", base + np.timedelta64(120, "D"), "CME"),   # far away
+    ]
+    fig = build_overlay(dets, aligned, meta, rs.bin_mid_utc, events=events)
+    shapes = [s for s in fig.layout.shapes if (s.name or "").startswith("event-")]
+    anns = [a for a in fig.layout.annotations if (a.name or "").startswith("event-")]
+    assert len(shapes) == 4                    # a dotted line for every event
+    assert len(anns) == 2                      # tight cluster -> 1 label, + the far one
+    labels = sorted(a.text for a in anns)
+    assert labels == ["CME", "X8.1 +2"]        # strongest flare named; far CME kept
+
+
 def test_events_requested_meta_merges_with_header_meta():
     """eventsRequested must not clobber the header_title/header_meta stashed
     by _apply_common_layout -- update_layout(meta=...) replaces the dict

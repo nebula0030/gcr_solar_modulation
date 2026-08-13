@@ -257,24 +257,67 @@ _EVENT_COLORS = {"cme": "#7b3fbf", "flare": "#d98324"}
 _EVENT_COLORS_DARK = {"cme": "#b085e0", "flare": "#e0a35a"}
 
 
+def _event_significance(ev: SolarEvent) -> float:
+    """Rank used to pick which event in a crowded cluster gets the label.
+
+    X-class flares sort above CMEs, and stronger flares above weaker ones
+    (X8.1 > X1.0), so a major flare is never hidden behind a lesser event
+    that merely happened to come first.
+    """
+    if ev.kind == "flare" and ev.label[:1].upper() == "X":
+        try:
+            return 100.0 + float(ev.label[1:])
+        except ValueError:
+            return 100.0
+    return 0.0
+
+
 def _add_event_marks(fig: go.Figure, events: Optional[List[SolarEvent]],
                      xref: str = "x") -> None:
-    """Draw a hidden dotted vertical line + top label for each solar event.
+    """Draw a hidden dotted vertical line for every solar event plus a
+    decluttered set of top labels.
 
-    Shapes/annotations are added disabled (``visible=False``); a later task
-    wires up the client-side toggle. ``events=None``/empty -> nothing drawn.
+    Every event gets its own line, but a permanent per-event label does not
+    scale: over a long run with many/clustered events (e.g. a multi-flare
+    storm) the vertical labels overlap into an unreadable smear. So events
+    that fall closer together than ``span/50`` are grouped, and only the most
+    significant event in each group is labelled (with ``+N`` when it stands in
+    for others). Shapes/annotations are added disabled (``visible=False``);
+    the combined page wires the client-side toggle. ``events=None``/empty ->
+    nothing drawn.
     """
     if not events:
         return
-    for ev in events:
+    evs = sorted(events, key=lambda e: e.utc)
+
+    # A dotted line for every event.
+    for ev in evs:
         color = _EVENT_COLORS.get(ev.kind, _MUTED_INK)
-        tag = "event-" + ev.kind
-        x = _iso(ev.utc)
         fig.add_shape(type="line", xref=xref, yref="paper",
-                      x0=x, x1=x, y0=0, y1=1, name=tag, visible=False,
+                      x0=_iso(ev.utc), x1=_iso(ev.utc), y0=0, y1=1,
+                      name="event-" + ev.kind, visible=False,
                       line=dict(color=color, width=1, dash="dot"))
-        fig.add_annotation(xref=xref, yref="paper", x=x, y=1.01,
-                           text=ev.label, name=tag, visible=False,
+
+    # Group events closer together than span/50 so their labels don't collide.
+    span_s = (evs[-1].utc - evs[0].utc) / np.timedelta64(1, "s")
+    min_gap_s = span_s / 50.0 if span_s > 0 else 0.0
+    clusters: List[List[SolarEvent]] = [[evs[0]]]
+    for ev in evs[1:]:
+        gap_s = (ev.utc - clusters[-1][-1].utc) / np.timedelta64(1, "s")
+        if gap_s <= min_gap_s:
+            clusters[-1].append(ev)
+        else:
+            clusters.append([ev])
+
+    # Label each cluster once, on its most significant member.
+    for cluster in clusters:
+        rep = max(cluster, key=_event_significance)
+        label = rep.label
+        if len(cluster) > 1:
+            label = "{0} +{1}".format(rep.label, len(cluster) - 1)
+        color = _EVENT_COLORS.get(rep.kind, _MUTED_INK)
+        fig.add_annotation(xref=xref, yref="paper", x=_iso(rep.utc), y=1.01,
+                           text=label, name="event-" + rep.kind, visible=False,
                            showarrow=False, font=dict(color=color, size=10),
                            textangle=-90, yanchor="bottom")
 
