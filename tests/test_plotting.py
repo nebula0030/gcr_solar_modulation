@@ -1239,6 +1239,14 @@ def test_event_labels_are_decluttered_and_pick_the_strongest():
     labels = sorted(a.text for a in anns)
     assert labels == ["CME", "X8.1 +2"]        # strongest flare named; far CME kept
 
+    # The cluster label's hover tooltip lists EVERY event it folds in, so the
+    # events without their own label are still identifiable on hover.
+    cluster_ann = next(a for a in anns if a.text == "X8.1 +2")
+    assert cluster_ann.captureevents is True
+    for token in ("X1.0", "X8.1", "CME", "2026-02-01", "UTC"):
+        assert token in cluster_ann.hovertext
+    assert cluster_ann.hovertext.count("<br>") == 2   # 3 events -> 2 separators
+
 
 def test_events_requested_meta_merges_with_header_meta():
     """eventsRequested must not clobber the header_title/header_meta stashed

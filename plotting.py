@@ -309,17 +309,26 @@ def _add_event_marks(fig: go.Figure, events: Optional[List[SolarEvent]],
         else:
             clusters.append([ev])
 
-    # Label each cluster once, on its most significant member.
+    # Label each cluster once, on its most significant member. The label
+    # carries a hover tooltip listing every event in the cluster (exact class
+    # and UTC time), so the events folded behind a "+N" are still identifiable
+    # -- hover the label to expand the whole group.
     for cluster in clusters:
         rep = max(cluster, key=_event_significance)
         label = rep.label
         if len(cluster) > 1:
             label = "{0} +{1}".format(rep.label, len(cluster) - 1)
         color = _EVENT_COLORS.get(rep.kind, _MUTED_INK)
+        hover = "<br>".join(
+            "{0} — {1}".format(
+                str(np.datetime64(e.utc, "m")).replace("T", " ") + " UTC",
+                e.label)
+            for e in sorted(cluster, key=lambda e: e.utc))
         fig.add_annotation(xref=xref, yref="paper", x=_iso(rep.utc), y=1.01,
                            text=label, name="event-" + rep.kind, visible=False,
                            showarrow=False, font=dict(color=color, size=10),
-                           textangle=-90, yanchor="bottom")
+                           textangle=-90, yanchor="bottom",
+                           hovertext=hover, captureevents=True)
 
 
 def build_anomaly_payload(detectors: List[DetectorSeries]) -> List[dict]:
