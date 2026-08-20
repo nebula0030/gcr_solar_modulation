@@ -641,13 +641,43 @@ def test_summary_mean_raw_rate_is_finite_when_a_bin_is_dead():
 # --- --events CLI wiring (Task 6) -------------------------------------------
 
 
-def test_events_flag_off_makes_no_donki_call(tmp_path, monkeypatch):
+def test_no_events_flag_makes_no_donki_call(tmp_path, monkeypatch):
+    """--no-events skips the fetch entirely (no network, no checkbox)."""
     import external_sources
 
     def boom(*a, **k):
-        raise AssertionError("fetch_solar_events must not run")
+        raise AssertionError("fetch_solar_events must not run with --no-events")
 
     monkeypatch.setattr(external_sources, "fetch_solar_events", boom)
+
+    path = os.path.join(FIXTURES, "sample_13col.txt")
+    code = main([
+        path, "--bin-length", "2",
+        "--correction-method", "literature", "--beta-p", "-0.13",
+        "--sources", "",
+        "--no-events",
+        "--output-dir", str(tmp_path),
+        "--cache-dir", str(tmp_path / "cache"),
+    ])
+    assert code == 0
+    content = (tmp_path / "sample_13col.html").read_text()
+    assert 'id="events-toggle"' not in content
+
+
+def test_events_fetched_by_default(tmp_path, monkeypatch):
+    """Events are on by default: a run with no events flag fetches DONKI and
+    shows the toggle when events are returned."""
+    import external_sources
+    import numpy as np
+
+    called = {"n": 0}
+
+    def fake(*a, **k):
+        called["n"] += 1
+        return [external_sources.SolarEvent(
+            "flare", np.datetime64("2026-07-10T00:00:02"), "X1.0")]
+
+    monkeypatch.setattr(external_sources, "fetch_solar_events", fake)
 
     path = os.path.join(FIXTURES, "sample_13col.txt")
     code = main([
@@ -658,8 +688,9 @@ def test_events_flag_off_makes_no_donki_call(tmp_path, monkeypatch):
         "--cache-dir", str(tmp_path / "cache"),
     ])
     assert code == 0
+    assert called["n"] == 1  # fetched without any events flag
     content = (tmp_path / "sample_13col.html").read_text()
-    assert 'id="events-toggle"' not in content
+    assert 'id="events-toggle"' in content
 
 
 def test_events_flag_on_fetches_and_passes(tmp_path, monkeypatch):

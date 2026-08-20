@@ -110,9 +110,12 @@ def build_parser() -> argparse.ArgumentParser:
     ext.add_argument("--sources", default=",".join(ALL_SOURCES),
                      help="comma-separated subset of %s (default: all)"
                           % ",".join(ALL_SOURCES))
-    ext.add_argument("--events", action="store_true",
-                     help="mark DONKI CME arrivals and X-class flares as "
-                          "vertical lines")
+    ext.add_argument("--events", action=argparse.BooleanOptionalAction,
+                     default=True,
+                     help="fetch DONKI CME arrivals and X-class flares and mark "
+                          "them as vertical lines (default: on; use --no-events "
+                          "to skip the fetch). The on-page 'Show events' box "
+                          "stays unchecked until you tick it.")
 
     cache_group = parser.add_argument_group("cache")
     cache_group.add_argument("--cache-dir", default="cache",

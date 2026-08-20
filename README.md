@@ -214,6 +214,18 @@ requested bin length.
 
 Run `.venv/bin/python process_data.py --help` for the full list.
 
+## Solar events (CME / X-flare markers)
+
+By default the tool fetches Earth-directed CME arrivals and X-class solar flares
+for the run's time window from NASA's DONKI database and draws each as a dotted
+vertical line. Pass `--no-events` to skip that fetch. Set `NASA_API_KEY` for a
+higher rate limit (otherwise `DEMO_KEY` is used).
+
+On the page, a **Show events** checkbox (unchecked by default) toggles the lines
+in both tabs. Where events cluster, only the most significant one per group is
+labelled (with `+N` for the rest); hover a label to list every event it stands
+in for.
+
 ## Data sources
 
 - Neutron monitors: [NMDB](https://www.nmdb.eu/)
@@ -221,6 +233,7 @@ Run `.venv/bin/python process_data.py --help` for the full list.
   [NOAA NCEI](https://www.ngdc.noaa.gov/)
 - Kp index: [GFZ Potsdam](https://kp.gfz.de/)
 - Sunspot number: [SILSO, Royal Observatory of Belgium](https://www.sidc.be/SILSO/)
+- Solar events (CME/flare): [NASA CCMC DONKI](https://kauai.ccmc.gsfc.nasa.gov/DONKI/)
 
 We acknowledge the NMDB database (www.nmdb.eu), founded under the European
 Union's FP7 programme (contract no. 213007), and the PIs of the individual
