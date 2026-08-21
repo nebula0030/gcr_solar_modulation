@@ -539,6 +539,7 @@ DONKI_ACKNOWLEDGEMENT = (
     "Solar events (CME/flare) courtesy of the NASA CCMC DONKI database "
     "(https://kauai.ccmc.gsfc.nasa.gov/DONKI/).")
 _DONKI = "https://api.nasa.gov/DONKI"
+_CME_TRANSIT_PAD_DAYS = 5  # a direct hit can launch ~1-4 days before it arrives
 
 
 @dataclass
@@ -619,6 +620,8 @@ def fetch_solar_events(
     key = api_key or os.environ.get("NASA_API_KEY") or "DEMO_KEY"
     s = str(np.datetime64(start_utc, "D"))
     e = str(np.datetime64(end_utc, "D"))
+    cme_s = str(np.datetime64(start_utc, "D")
+                - np.timedelta64(_CME_TRANSIT_PAD_DAYS, "D"))
 
     def _get(url, params, cache_key):
         if cache is not None:
@@ -629,8 +632,8 @@ def fetch_solar_events(
                {"startDate": s, "endDate": e, "api_key": key},
                "donki-flr|{0}|{1}".format(s, e))
     cme = _get(_DONKI + "/CME",
-               {"startDate": s, "endDate": e, "api_key": key},
-               "donki-cme|{0}|{1}".format(s, e))
+               {"startDate": cme_s, "endDate": e, "api_key": key},
+               "donki-cme|{0}|{1}".format(cme_s, e))
     events = (parse_donki_flares(flr, np.datetime64(start_utc),
                                   np.datetime64(end_utc))
               + parse_donki_cme(cme, np.datetime64(start_utc),

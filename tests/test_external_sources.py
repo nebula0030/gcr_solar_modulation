@@ -121,3 +121,18 @@ def test_fetch_solar_events_propagates_fetcherror(monkeypatch):
     monkeypatch.setattr(es, "http_get", boom)
     with pytest.raises(es.FetchError):
         es.fetch_solar_events(START, END)
+
+
+def test_cme_query_start_is_padded_back(monkeypatch):
+    calls = {}
+    def fake_http_get(url, params=None):
+        calls[url.rsplit("/", 1)[1]] = params  # "FLR" / "CME" -> params
+        return b"[]"
+    monkeypatch.setattr(es, "http_get", fake_http_get)
+    start = np.datetime64("2026-02-01T00:00:00")
+    end = np.datetime64("2026-03-01T00:00:00")
+    es.fetch_solar_events(start, end)
+    # FLR queried at the window start; CME queried PAD days earlier.
+    assert calls["FLR"]["startDate"] == "2026-02-01"
+    assert calls["CME"]["startDate"] == "2026-01-27"  # 5 days earlier
+    assert calls["CME"]["endDate"] == "2026-03-01"
