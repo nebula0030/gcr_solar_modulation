@@ -23,31 +23,55 @@ def test_parse_flares_keeps_x_class_at_peak():
     assert evs[0].utc == np.datetime64("2026-08-11T14:24")
 
 
-def test_parse_cme_keeps_earth_directed_arrival():
-    payload = json.dumps([
-        {"cmeAnalyses": [
-            {"isMostAccurate": True, "enlilList": [
-                {"isEarthGB": True,
-                 "estimatedShockArrivalTime": "2026-08-12T06:00Z"}]}]},
-        {"cmeAnalyses": [
-            {"isMostAccurate": True, "enlilList": [
-                {"isEarthGB": False, "estimatedShockArrivalTime": None}]}]},  # dropped
-    ]).encode()
+def _cme(onset, runs):
+    # runs: list of (isEarthGB, isEarthMinorImpact, arrival, isMostAccurate, level)
+    return {"startTime": onset, "cmeAnalyses": [
+        {"isMostAccurate": ma, "levelOfData": lvl, "submissionTime": "2026-01-01T00:00Z",
+         "enlilList": [{"isEarthGB": gb, "isEarthMinorImpact": mi,
+                        "estimatedShockArrivalTime": arr}]}
+        for (gb, mi, arr, ma, lvl) in runs]}
+
+
+def test_parse_cme_keeps_direct_hit():
+    payload = json.dumps([_cme("2026-08-11T00:00Z",
+        [(False, False, "2026-08-12T06:00Z", True, 1)])]).encode()
     evs = es.parse_donki_cme(payload, START, END)
-    assert len(evs) == 1
-    assert evs[0].kind == "cme" and evs[0].label == "CME"
+    assert len(evs) == 1 and evs[0].kind == "cme" and evs[0].label == "CME"
     assert evs[0].utc == np.datetime64("2026-08-12T06:00")
 
 
-def test_parse_cme_drops_non_earth_directed_even_with_arrival():
-    payload = json.dumps([
-        {"cmeAnalyses": [
-            {"isMostAccurate": True, "enlilList": [
-                {"isEarthGB": False,
-                 "estimatedShockArrivalTime": "2026-08-12T06:00Z"}]}]},
-    ]).encode()
+def test_parse_cme_drops_glancing_blow():
+    payload = json.dumps([_cme("2026-08-11T00:00Z",
+        [(True, False, "2026-08-12T06:00Z", True, 1)])]).encode()
+    assert es.parse_donki_cme(payload, START, END) == []
+
+
+def test_parse_cme_drops_minor_impact():
+    payload = json.dumps([_cme("2026-08-11T00:00Z",
+        [(False, True, "2026-08-12T06:00Z", True, 1)])]).encode()
+    assert es.parse_donki_cme(payload, START, END) == []
+
+
+def test_parse_cme_drops_no_earth_arrival():
+    payload = json.dumps([_cme("2026-08-11T00:00Z",
+        [(False, False, None, True, 1)])]).encode()
+    assert es.parse_donki_cme(payload, START, END) == []
+
+
+def test_parse_cme_best_run_prefers_highest_level(monkeypatch):
+    # two most-accurate analyses, level 0 (arrival A) and level 1 (arrival B);
+    # the level-1 arrival must win (mirrors the real 2026-01-18 record).
+    payload = json.dumps([{"startTime": "2026-08-11T00:00Z", "cmeAnalyses": [
+        {"isMostAccurate": True, "levelOfData": 0, "submissionTime": "2026-08-11T06:00Z",
+         "enlilList": [{"isEarthGB": False, "isEarthMinorImpact": False,
+                        "estimatedShockArrivalTime": "2026-08-12T00:00Z"}]},
+        {"isMostAccurate": True, "levelOfData": 1, "submissionTime": "2026-08-11T14:00Z",
+         "enlilList": [{"isEarthGB": False, "isEarthMinorImpact": False,
+                        "estimatedShockArrivalTime": "2026-08-12T06:00Z"}]},
+    ]}]).encode()
     evs = es.parse_donki_cme(payload, START, END)
-    assert evs == []
+    assert len(evs) == 1
+    assert evs[0].utc == np.datetime64("2026-08-12T06:00")  # level-1 arrival
 
 
 def test_parse_flares_window_boundaries_inclusive():

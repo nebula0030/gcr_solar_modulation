@@ -20,7 +20,7 @@ import json
 import os
 import re
 from dataclasses import dataclass
-from typing import Callable, List, Tuple
+from typing import Callable, List, Optional, Tuple
 
 import numpy as np
 import requests
@@ -569,21 +569,34 @@ def parse_donki_flares(payload: bytes, start, end) -> List[SolarEvent]:
     return out
 
 
+def _direct_hit_arrival(cme) -> Optional[str]:
+    """Earth shock-arrival time if this CME's best model run is a DIRECT hit
+    (reaches Earth, not a glancing blow, not a minor impact); else None.
+
+    Best run: most-accurate analysis, then highest levelOfData, then latest
+    submissionTime; judged on its first enlil entry that has an arrival time.
+    """
+    analyses = cme.get("cmeAnalyses") or []
+    # latest submissionTime first (stable base), then most-accurate + highest level.
+    analyses = sorted(analyses, key=lambda a: a.get("submissionTime") or "",
+                      reverse=True)
+    analyses = sorted(analyses, key=lambda a: (not a.get("isMostAccurate"),
+                                               -(a.get("levelOfData") or 0)))
+    for a in analyses:
+        for e in (a.get("enlilList") or []):
+            if e.get("estimatedShockArrivalTime"):
+                if not e.get("isEarthGB") and not e.get("isEarthMinorImpact"):
+                    return e["estimatedShockArrivalTime"]
+                return None  # best arrival-bearing run is glancing/minor -> drop
+    return None
+
+
 def parse_donki_cme(payload: bytes, start, end) -> List[SolarEvent]:
-    """Parse DONKI CME JSON, keeping the most-accurate Earth-directed arrival."""
+    """Parse DONKI CME JSON, keeping only DIRECT Earth hits (not glancing blows
+    or minor impacts), marked at their predicted Earth shock arrival."""
     out = []
     for c in json.loads(payload):
-        analyses = c.get("cmeAnalyses") or []
-        # most-accurate first, then any
-        analyses = sorted(analyses, key=lambda a: not a.get("isMostAccurate"))
-        arrival = None
-        for a in analyses:
-            for e in (a.get("enlilList") or []):
-                if e.get("isEarthGB") and e.get("estimatedShockArrivalTime"):
-                    arrival = e["estimatedShockArrivalTime"]
-                    break
-            if arrival:
-                break
+        arrival = _direct_hit_arrival(c)
         if not arrival:
             continue
         t = _donki_time(arrival)
