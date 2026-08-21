@@ -1235,6 +1235,47 @@ def test_side_by_side_extends_matched_axes_for_pre_data_event():
     assert np.datetime64(fig.layout.xaxis.range[0]) < rs.bin_mid_utc[0]
 
 
+def test_overlay_leadin_range_right_end_covers_data_end():
+    rs, corr, aligned, meta = make_inputs()
+    dets = [DetectorSeries("Muon rate", rs, corr)]
+    ev = [es.SolarEvent("cme", np.datetime64("2026-07-09T00:00:00"), "CME")]
+    fig = build_overlay(dets, aligned, meta, rs.bin_mid_utc, events=ev)
+    rng = fig.layout.xaxis.range
+    assert rng is not None
+    assert np.datetime64(rng[1]) >= rs.bin_mid_utc[-1]   # right end not clipped
+
+
+def test_leadin_does_not_range_the_marginal_axis():
+    rs, corr, aligned, meta = make_inputs()
+    dets = [DetectorSeries("Muon rate", rs, corr)]
+    ev = [es.SolarEvent("cme", np.datetime64("2026-07-09T00:00:00"), "CME")]
+    # overlay: the marginal axis is xaxis3 (domain [0.85,1.0]); it must have no range
+    ov = build_overlay(dets, aligned, meta, rs.bin_mid_utc, events=ev)
+    assert ov.layout.xaxis.range is not None          # time axis extended
+    assert getattr(ov.layout, "xaxis3", None) is not None
+    assert ov.layout.xaxis3.range is None              # marginal axis untouched
+    # side-by-side: the marginal axis is xaxis{n_rows+1}; find any x-axis whose
+    # domain starts at ~0.85 and assert it has no range.
+    sb = build_side_by_side(dets, aligned, meta, rs.bin_mid_utc, events=ev)
+    lay = sb.layout.to_plotly_json()
+    marginal_axes = [k for k, v in lay.items()
+                     if k.startswith("xaxis") and isinstance(v, dict)
+                     and v.get("domain") and abs(v["domain"][0] - 0.85) < 1e-6]
+    assert marginal_axes, "expected a marginal x-axis at domain start 0.85"
+    for k in marginal_axes:
+        assert lay[k].get("range") is None
+
+
+def test_side_by_side_no_range_without_pre_data_event():
+    rs, corr, aligned, meta = make_inputs()
+    dets = [DetectorSeries("Muon rate", rs, corr)]
+    inwin = [es.SolarEvent("flare", rs.bin_mid_utc[1], "X1.0")]  # in-window
+    fig = build_side_by_side(dets, aligned, meta, rs.bin_mid_utc, events=inwin)
+    assert fig.layout.xaxis.range is None
+    fig2 = build_side_by_side(dets, aligned, meta, rs.bin_mid_utc)  # no events
+    assert fig2.layout.xaxis.range is None
+
+
 def test_overlay_adds_hidden_event_shapes_and_annotations():
     rs, corr, aligned, meta = make_inputs()
     dets = [DetectorSeries("Muon rate", rs, corr)]
