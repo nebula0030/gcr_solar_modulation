@@ -1198,6 +1198,43 @@ def _two_events():
     ]
 
 
+def _pre_data_event():
+    # sample fixture master grid starts 2026-07-10T00:00:00 (see make_inputs);
+    # this event is a day earlier.
+    return [es.SolarEvent("cme", np.datetime64("2026-07-09T00:00:00"), "CME")]
+
+
+def test_overlay_extends_axis_left_for_pre_data_event():
+    rs, corr, aligned, meta = make_inputs()
+    dets = [DetectorSeries("Muon rate", rs, corr)]
+    fig = build_overlay(dets, aligned, meta, rs.bin_mid_utc, events=_pre_data_event())
+    rng = fig.layout.xaxis.range
+    assert rng is not None
+    assert np.datetime64(rng[0]) < rs.bin_mid_utc[0]   # extended before data start
+    assert np.datetime64(rng[0]) <= np.datetime64("2026-07-09T00:00:00")
+
+
+def test_overlay_no_axis_range_without_pre_data_event():
+    rs, corr, aligned, meta = make_inputs()
+    dets = [DetectorSeries("Muon rate", rs, corr)]
+    # event WITHIN the data window -> no left extension.
+    inwin = [es.SolarEvent("flare", rs.bin_mid_utc[1], "X1.0")]
+    fig = build_overlay(dets, aligned, meta, rs.bin_mid_utc, events=inwin)
+    assert fig.layout.xaxis.range is None
+    fig2 = build_overlay(dets, aligned, meta, rs.bin_mid_utc)  # no events
+    assert fig2.layout.xaxis.range is None
+
+
+def test_side_by_side_extends_matched_axes_for_pre_data_event():
+    rs, corr, aligned, meta = make_inputs()
+    dets = [DetectorSeries("Muon rate", rs, corr)]
+    fig = build_side_by_side(dets, aligned, meta, rs.bin_mid_utc,
+                             events=_pre_data_event())
+    # row-1 time axis range starts before the data.
+    assert fig.layout.xaxis.range is not None
+    assert np.datetime64(fig.layout.xaxis.range[0]) < rs.bin_mid_utc[0]
+
+
 def test_overlay_adds_hidden_event_shapes_and_annotations():
     rs, corr, aligned, meta = make_inputs()
     dets = [DetectorSeries("Muon rate", rs, corr)]

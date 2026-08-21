@@ -272,6 +272,23 @@ def _event_significance(ev: SolarEvent) -> float:
     return 0.0
 
 
+def _leadin_range(master_utc, events):
+    """If any event precedes the data start, an (x0, x1) ISO range that extends
+    the time axis left to show it (with a small pad both ends); else None."""
+    if not events:
+        return None
+    data_start = master_utc[0]
+    pre = [np.datetime64(ev.utc) for ev in events
+           if np.datetime64(ev.utc) < data_start]
+    if not pre:
+        return None
+    earliest = min(pre)
+    right = master_utc[-1]
+    span_s = (right - earliest) / np.timedelta64(1, "s")
+    pad = np.timedelta64(max(int(span_s * 0.02), 1), "s")
+    return (_iso(earliest - pad), _iso(right + pad))
+
+
 def _add_event_marks(fig: go.Figure, events: Optional[List[SolarEvent]],
                      xref: str = "x") -> None:
     """Draw a hidden dotted vertical line for every solar event plus a
@@ -546,9 +563,11 @@ def build_overlay(
     # draws an empty, auto-ranged axis whose SI-prefixed ticks ("15u" etc.)
     # clutter the plot and sit confusingly next to the y-axis marginal.
     has_secondary = any(s.source not in MODULATION_SOURCES for s in aligned)
+    lead = _leadin_range(master_utc, events)
     layout = dict(
         xaxis=dict(title="Time (UTC)", gridcolor=_GRIDLINE_COLOR,
-                   linecolor=_MUTED_INK, domain=[0.0, 0.82]),
+                   linecolor=_MUTED_INK, domain=[0.0, 0.82],
+                   **({"range": list(lead)} if lead else {})),
         yaxis=dict(title="Deviation from run mean (%)",
                    gridcolor=_GRIDLINE_COLOR, linecolor=_MUTED_INK),
         xaxis3=dict(domain=[0.85, 1.0], anchor="y", title="bins",
@@ -632,6 +651,10 @@ def build_side_by_side(
 
     fig.update_xaxes(title_text="Time (UTC)", row=n_rows, col=1)
     fig.update_xaxes(matches="x", gridcolor=_GRIDLINE_COLOR, linecolor=_MUTED_INK)
+    lead = _leadin_range(master_utc, events)
+    if lead:
+        for r in range(1, n_rows + 1):
+            fig.update_xaxes(range=list(lead), row=r, col=1)
     # Shrink every stacked time panel to the same left strip so they stay
     # vertically aligned and zoom-synced with the marginal parked at the right.
     fig.update_xaxes(domain=[0.0, 0.82])
