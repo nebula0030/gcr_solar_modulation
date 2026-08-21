@@ -58,7 +58,7 @@ def test_parse_cme_drops_no_earth_arrival():
     assert es.parse_donki_cme(payload, START, END) == []
 
 
-def test_parse_cme_best_run_prefers_highest_level(monkeypatch):
+def test_parse_cme_best_run_prefers_highest_level():
     # two most-accurate analyses, level 0 (arrival A) and level 1 (arrival B);
     # the level-1 arrival must win (mirrors the real 2026-01-18 record).
     payload = json.dumps([{"startTime": "2026-08-11T00:00Z", "cmeAnalyses": [
@@ -72,6 +72,36 @@ def test_parse_cme_best_run_prefers_highest_level(monkeypatch):
     evs = es.parse_donki_cme(payload, START, END)
     assert len(evs) == 1
     assert evs[0].utc == np.datetime64("2026-08-12T06:00")  # level-1 arrival
+
+
+def test_parse_cme_level_dominates_submissiontime():
+    payload = json.dumps([{"startTime": "2026-08-11T00:00Z", "cmeAnalyses": [
+        # level 1, LATER submission, arrival A
+        {"isMostAccurate": True, "levelOfData": 1, "submissionTime": "2026-08-11T18:00Z",
+         "enlilList": [{"isEarthGB": False, "isEarthMinorImpact": False,
+                        "estimatedShockArrivalTime": "2026-08-12T00:00Z"}]},
+        # level 2, EARLIER submission, arrival B  -> higher level must win
+        {"isMostAccurate": True, "levelOfData": 2, "submissionTime": "2026-08-11T06:00Z",
+         "enlilList": [{"isEarthGB": False, "isEarthMinorImpact": False,
+                        "estimatedShockArrivalTime": "2026-08-12T09:00Z"}]},
+    ]}]).encode()
+    evs = es.parse_donki_cme(payload, START, END)
+    assert len(evs) == 1
+    assert evs[0].utc == np.datetime64("2026-08-12T09:00")  # level-2 arrival, not the later-submitted level-1
+
+
+def test_parse_cme_glancing_best_run_blocks_fallback_to_lower_direct():
+    payload = json.dumps([{"startTime": "2026-08-11T00:00Z", "cmeAnalyses": [
+        # top priority: most-accurate, level 2 -> GLANCING blow (with arrival)
+        {"isMostAccurate": True, "levelOfData": 2, "submissionTime": "2026-08-11T12:00Z",
+         "enlilList": [{"isEarthGB": True, "isEarthMinorImpact": False,
+                        "estimatedShockArrivalTime": "2026-08-12T06:00Z"}]},
+        # lower priority: level 1 -> DIRECT hit (with arrival)
+        {"isMostAccurate": True, "levelOfData": 1, "submissionTime": "2026-08-11T06:00Z",
+         "enlilList": [{"isEarthGB": False, "isEarthMinorImpact": False,
+                        "estimatedShockArrivalTime": "2026-08-12T10:00Z"}]},
+    ]}]).encode()
+    assert es.parse_donki_cme(payload, START, END) == []  # dropped: best run is glancing, no fallback
 
 
 def test_parse_flares_window_boundaries_inclusive():
