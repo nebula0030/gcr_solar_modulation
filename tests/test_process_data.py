@@ -738,3 +738,33 @@ def test_events_flag_fetch_failure_is_fail_soft(tmp_path, monkeypatch):
     assert "Unavailable" in content
     assert "solar events" in content
     assert 'id="events-toggle"' not in content
+
+
+def test_event_lead_days_default_and_zero():
+    p = build_parser()
+    assert p.parse_args(["f.txt", "--bin-length", "3600"]).event_lead_days == 5
+    assert p.parse_args(["f.txt", "--bin-length", "3600",
+                         "--event-lead-days", "0"]).event_lead_days == 0
+
+
+def test_event_fetch_window_is_widened_by_lead_days(tmp_path, monkeypatch):
+    import external_sources
+    seen = {}
+
+    def capture(start_utc, end_utc, *a, **k):
+        seen["start"] = np.datetime64(start_utc)
+        return []
+
+    monkeypatch.setattr(external_sources, "fetch_solar_events", capture)
+
+    path = os.path.join(FIXTURES, "sample_13col.txt")
+    code = main([
+        path, "--bin-length", "2",
+        "--correction-method", "literature", "--beta-p", "-0.13",
+        "--sources", "", "--event-lead-days", "3",
+        "--output-dir", str(tmp_path),
+        "--cache-dir", str(tmp_path / "cache"),
+    ])
+    assert code == 0
+    # sample_13col.txt starts 2026-07-10T00:00:00; 3-day lead-in -> 2026-07-07.
+    assert seen["start"] == np.datetime64("2026-07-07T00:00:00")

@@ -116,6 +116,9 @@ def build_parser() -> argparse.ArgumentParser:
                           "them as vertical lines (default: on; use --no-events "
                           "to skip the fetch). The on-page 'Show events' box "
                           "stays unchecked until you tick it.")
+    ext.add_argument("--event-lead-days", type=int, default=5, metavar="DAYS",
+                     help="also fetch/mark solar events up to DAYS before the "
+                          "data starts (default: 5; 0 disables the lead-in)")
 
     cache_group = parser.add_argument_group("cache")
     cache_group.add_argument("--cache-dir", default="cache",
@@ -644,9 +647,10 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     events = None
     if args.events:
+        event_start = master_start[0] - np.timedelta64(args.event_lead_days, "D")
         try:
             events = external_sources.fetch_solar_events(
-                master_start[0], master_end_utc, cache=cache)
+                event_start, master_end_utc, cache=cache)
             footer_notes.append(external_sources.DONKI_ACKNOWLEDGEMENT)
         except external_sources.FetchError as exc:
             events = None
