@@ -645,7 +645,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     footer_notes.extend("Note: " + n for n in notes)
     footer_notes.extend("Unavailable - " + w for w in warnings)
 
+    # Events are on by default (--no-events opts out). Whenever they are
+    # enabled the "Show events" control appears automatically -- even if the
+    # fetch finds nothing or fails -- so it is never gated on a successful
+    # network call. A failed fetch yields an empty list (not None) so the
+    # builders still mark the figure as events-enabled; None means the user
+    # explicitly disabled events with --no-events.
     events = None
+    events_failed = False
     if args.events:
         event_start = master_start[0] - np.timedelta64(args.event_lead_days, "D")
         try:
@@ -653,7 +660,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                 event_start, master_end_utc, cache=cache)
             footer_notes.append(external_sources.DONKI_ACKNOWLEDGEMENT)
         except external_sources.FetchError as exc:
-            events = None
+            events = []
+            events_failed = True
             footer_notes.append(
                 "Unavailable - solar events: {0}".format(exc))
 
@@ -710,13 +718,19 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     combined_path = os.path.join(output_dir, run_name + ".html")
     anomaly_payload = build_anomaly_payload(detectors)
-    write_combined_html(
-        build_overlay(detectors, aligned, meta, master_mid, gaps=gaps,
-                     events=events),
-        build_side_by_side(detectors, aligned, meta, master_mid, gaps=gaps,
-                           events=events),
-        combined_path, anomaly=anomaly_payload,
-    )
+    overlay_fig = build_overlay(detectors, aligned, meta, master_mid,
+                                gaps=gaps, events=events)
+    side_fig = build_side_by_side(detectors, aligned, meta, master_mid,
+                                  gaps=gaps, events=events)
+    # When events are enabled but there is nothing to draw, tell the page why,
+    # so the (always-present) control's note is accurate.
+    if events is not None and len(events) == 0:
+        note = ("solar events unavailable (see notes above)" if events_failed
+                else "no CME/X-flare events in this window")
+        for fig in (overlay_fig, side_fig):
+            fig.update_layout(meta=dict(fig.layout.meta or {}, eventsNote=note))
+    write_combined_html(overlay_fig, side_fig, combined_path,
+                        anomaly=anomaly_payload)
     print("Wrote {0}".format(combined_path))
 
     if args.export_csv:

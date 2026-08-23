@@ -1557,8 +1557,11 @@ def write_combined_html(
     }
 
     if has_events or events_requested:
-        note = ("no CME/X-flare events in this window"
-                if (events_requested and not has_events) else "")
+        meta_note = (overlay_fig.layout.meta or {}).get("eventsNote")
+        if events_requested and not has_events:
+            note = meta_note or "no CME/X-flare events in this window"
+        else:
+            note = ""
         events_control = (
             '<div class="events-ctl"><span class="ctl-label">Solar events</span>'
             '<label><input type="checkbox" id="events-toggle"> '

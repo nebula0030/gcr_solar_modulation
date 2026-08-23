@@ -716,7 +716,12 @@ def test_events_flag_on_fetches_and_passes(tmp_path, monkeypatch):
     assert 'id="events-toggle"' in content
 
 
-def test_events_flag_fetch_failure_is_fail_soft(tmp_path, monkeypatch):
+def test_events_fetch_failure_is_fail_soft_but_button_still_appears(
+        tmp_path, monkeypatch):
+    """A failed DONKI fetch must not crash the run AND must not hide the
+    control: the 'Show events' button appears automatically whenever events
+    are enabled (the default), with a note explaining the fetch was
+    unavailable."""
     import external_sources
 
     def raise_fetch_error(*a, **k):
@@ -729,7 +734,6 @@ def test_events_flag_fetch_failure_is_fail_soft(tmp_path, monkeypatch):
         path, "--bin-length", "2",
         "--correction-method", "literature", "--beta-p", "-0.13",
         "--sources", "",
-        "--events",
         "--output-dir", str(tmp_path),
         "--cache-dir", str(tmp_path / "cache"),
     ])
@@ -737,7 +741,8 @@ def test_events_flag_fetch_failure_is_fail_soft(tmp_path, monkeypatch):
     content = (tmp_path / "sample_13col.html").read_text()
     assert "Unavailable" in content
     assert "solar events" in content
-    assert 'id="events-toggle"' not in content
+    assert 'id="events-toggle"' in content              # button still present
+    assert "unavailable" in content.lower()             # accurate note
 
 
 def test_event_lead_days_default_and_zero():
