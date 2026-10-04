@@ -1,0 +1,10 @@
+# Detector data, generated HTML/CSV output, and the external-source HTTP cache
+results/
+
+# Reference papers kept alongside the code
+*.pdf
+
+# Python
+.venv/
+__pycache__/
+*.pyc
